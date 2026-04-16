@@ -1,0 +1,51 @@
+[
+  {
+    "id": "dp-auth-raw",
+    "name": "原始 Token 文件",
+    "description": "auth-data 目录下的单账号 JSON 文件（每个文件一条记录）",
+    "multiFile": true,
+    "recordsPath": "",
+    "fieldMapping": {
+      "email": "email",
+      "access_token": "access_token",
+      "refresh_token": "refresh_token",
+      "id_token": "id_token",
+      "account_id": "account_id"
+    },
+    "fingerprint": [
+      "email",
+      "access_token",
+      "refresh_token",
+      "id_token",
+      "meta"
+    ],
+    "builtin": true,
+    "createdAt": "2026-04-05T00:00:00.000Z",
+    "updatedAt": "2026-04-05T00:00:00.000Z"
+  },
+  {
+    "id": "dp-sub2api-export",
+    "name": "SUB2API 导出",
+    "description": "SUB2API 平台导出的 accounts JSON 文件",
+    "multiFile": false,
+    "recordsPath": "accounts",
+    "fieldMapping": {
+      "email": "extra.email",
+      "access_token": "credentials.access_token",
+      "refresh_token": "credentials.refresh_token",
+      "id_token": "credentials.id_token",
+      "plan_type": "credentials.plan_type",
+      "account_id": "credentials.chatgpt_account_id",
+      "organization_id": "credentials.organization_id"
+    },
+    "fingerprint": [
+      "credentials.access_token",
+      "credentials.plan_type",
+      "extra.email",
+      "concurrency"
+    ],
+    "builtin": true,
+    "createdAt": "2026-04-05T00:00:00.000Z",
+    "updatedAt": "2026-04-05T00:00:00.000Z"
+  }
+]
