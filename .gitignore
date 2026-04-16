@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+client/dist/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Database files (SQLite) - global
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Data directory runtime files
+data/uploads/
+data/push-tasks/
+data/channels.json
+data/profiles.json
+
+# Server runtime data
+server/auth-pusher.db*
+server/profiles.json
+
+# Sensitive data: token files and exports
+auth-data/
+04-04-ha-10/
