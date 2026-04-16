@@ -7,6 +7,13 @@ export interface PlanQuota {
   knivesPerUnit: number;
 }
 
+export interface DetectThresholds {
+  /** 未使用判定：5h 用量百分比 ≤ 此值 */
+  unusedFiveHourMaxPercent: number;
+  /** 未使用判定：7d 用量百分比 < 此值 */
+  unusedSevenDayMaxPercent: number;
+}
+
 export interface AppSettings {
   /** 推送间隔（毫秒） */
   pushIntervalMs: number;
@@ -18,6 +25,8 @@ export interface AppSettings {
   defaultTestModel: string;
   /** 每种 planType 的额度配置 */
   planQuotas: Record<string, PlanQuota>;
+  /** 独立检测页「未使用」分类阈值 */
+  detectThresholds: DetectThresholds;
   /** API 鉴权密钥，为空则不启用鉴权 */
   apiKey?: string;
   /** Webhook 通知 URL，任务完成/失败时推送（留空不启用） */
@@ -34,5 +43,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     plus: { fiveHourUnits: 80, sevenDayUnits: 1000, knivesPerUnit: 1 },
     pro: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
     team: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
+  },
+  detectThresholds: {
+    unusedFiveHourMaxPercent: 2,
+    unusedSevenDayMaxPercent: 1,
   },
 };

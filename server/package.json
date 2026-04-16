@@ -3,13 +3,14 @@
   "version": "1.0.0",
   "type": "module",
   "engines": {
-    "node": "22.x"
+    "node": ">=20"
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "migrate": "tsx src/persistence/migrate-json-to-sqlite.ts"
+    "migrate": "tsx src/persistence/migrate-json-to-sqlite.ts",
+    "postinstall": "pnpm rebuild better-sqlite3"
   },
   "dependencies": {
     "archiver": "^7.0.1",

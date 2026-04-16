@@ -12,6 +12,10 @@ const DEFAULTS: AppSettings = {
     pro: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
     team: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
   },
+  detectThresholds: {
+    unusedFiveHourMaxPercent: 2,
+    unusedSevenDayMaxPercent: 1,
+  },
 };
 
 const stmtGet = db.prepare<[string], { key: string; value: string }>('SELECT key, value FROM settings WHERE key = ?');
@@ -35,6 +39,7 @@ export function save(settings: AppSettings): void {
     ['defaultProbeModel', normalized.defaultProbeModel],
     ['defaultTestModel', normalized.defaultTestModel],
     ['planQuotas', normalized.planQuotas],
+    ['detectThresholds', normalized.detectThresholds],
   ];
   // Preserve optional keys
   if (settings.apiKey !== undefined) {
@@ -59,11 +64,22 @@ export function normalizeSettings(input: Partial<AppSettings>): AppSettings {
     ...Object.keys(rawPlanQuotas),
   ]);
 
+  const rawThresholds = (input.detectThresholds ?? {}) as Partial<AppSettings['detectThresholds']>;
+  const clampPercent = (value: unknown, fallback: number) => {
+    const num = Number(value ?? fallback);
+    if (!Number.isFinite(num)) return fallback;
+    return Math.min(100, Math.max(0, num));
+  };
+
   const result: AppSettings = {
     pushIntervalMs: Math.max(0, Number(input.pushIntervalMs ?? DEFAULTS.pushIntervalMs)),
     pushConcurrency: Math.max(1, Math.floor(Number(input.pushConcurrency ?? DEFAULTS.pushConcurrency))),
     defaultProbeModel: String(input.defaultProbeModel ?? DEFAULTS.defaultProbeModel).trim() || DEFAULTS.defaultProbeModel,
     defaultTestModel: String(input.defaultTestModel ?? DEFAULTS.defaultTestModel).trim() || DEFAULTS.defaultTestModel,
+    detectThresholds: {
+      unusedFiveHourMaxPercent: clampPercent(rawThresholds.unusedFiveHourMaxPercent, DEFAULTS.detectThresholds.unusedFiveHourMaxPercent),
+      unusedSevenDayMaxPercent: clampPercent(rawThresholds.unusedSevenDayMaxPercent, DEFAULTS.detectThresholds.unusedSevenDayMaxPercent),
+    },
     planQuotas: Object.fromEntries(
       Array.from(planNames).map((plan) => {
         const fallback = DEFAULTS.planQuotas[plan] ?? { fiveHourUnits: 0, sevenDayUnits: 0, knivesPerUnit: 1 };

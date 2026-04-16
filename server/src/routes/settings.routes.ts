@@ -20,6 +20,10 @@ settingsRoutes.put('/', (req, res) => {
       ...current.planQuotas,
       ...(body.planQuotas ?? {}),
     },
+    detectThresholds: {
+      ...current.detectThresholds,
+      ...(body.detectThresholds ?? {}),
+    },
   });
   settingsStore.save(updated);
   res.json(updated);

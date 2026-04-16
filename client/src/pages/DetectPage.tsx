@@ -12,6 +12,7 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@
 import { TextField } from '@/components/TextField';
 import { SelectField } from '@/components/SelectField';
 import { FileTrigger } from '@/components/FileTrigger';
+import { ExportDialog, type ExportOptions } from '@/components/ExportDialog';
 import { cn } from '@/lib/utils';
 
 interface ParsedData {
@@ -60,19 +61,62 @@ interface BatchUsageResult {
   results: AccountUsageResult[];
 }
 
-type ProbeStatusFilter = '' | 'unchecked' | 'ok' | 'rate_limited' | 'token_invalid' | 'error';
+type ProbeStatusFilter = '' | 'unchecked' | 'unused' | 'used' | 'rate_limited' | 'token_invalid' | 'error';
+
+type UsageCategory = 'unused' | 'used' | 'rate_limited' | 'token_invalid' | 'error' | 'unchecked';
+
+interface DetectThresholds {
+  unusedFiveHourMaxPercent: number;
+  unusedSevenDayMaxPercent: number;
+}
+
+const DEFAULT_DETECT_THRESHOLDS: DetectThresholds = {
+  unusedFiveHourMaxPercent: 2,
+  unusedSevenDayMaxPercent: 1,
+};
+
+function categorizeResult(
+  result: AccountUsageResult | undefined,
+  thresholds: DetectThresholds,
+): UsageCategory {
+  if (!result) return 'unchecked';
+  if (result.status === 'token_invalid') return 'token_invalid';
+  if (result.status === 'error') return 'error';
+  const usage = result.usage;
+  if (result.status === 'rate_limited') return 'rate_limited';
+  if (usage && (usage.fiveHourUsed >= 100 || usage.sevenDayUsed >= 100)) return 'rate_limited';
+  if (
+    usage
+    && usage.fiveHourUsed <= thresholds.unusedFiveHourMaxPercent
+    && usage.sevenDayUsed < thresholds.unusedSevenDayMaxPercent
+  ) {
+    return 'unused';
+  }
+  return 'used';
+}
+
+interface DerivedRow {
+  index: number;
+  fields: Record<string, unknown>;
+  email: string;
+  accountId: string;
+  planType: string;
+  accessToken: string;
+  result: AccountUsageResult | undefined;
+  category: UsageCategory;
+}
+
+const CATEGORY_META: Record<UsageCategory, { label: string; filename: string }> = {
+  unused: { label: '未使用', filename: 'unused' },
+  used: { label: '已使用', filename: 'used' },
+  rate_limited: { label: '限流', filename: 'rate-limited' },
+  token_invalid: { label: 'Token失效', filename: 'token-invalid' },
+  error: { label: '探测错误', filename: 'error' },
+  unchecked: { label: '未检测', filename: 'unchecked' },
+};
 
 const PLAN_TYPE_OPTIONS = [
   { value: '', label: '自动识别' },
-  { value: 'free', label: 'free' },
-  { value: 'plus', label: 'plus' },
-  { value: 'pro', label: 'pro' },
-  { value: 'team', label: 'team' },
-  { value: '__custom__', label: '其他' },
-];
-
-const EXPORT_PLAN_TYPE_OPTIONS = [
-  { value: '', label: '跟随当前数据' },
   { value: 'free', label: 'free' },
   { value: 'plus', label: 'plus' },
   { value: 'pro', label: 'pro' },
@@ -177,26 +221,28 @@ function sanitizeFilenamePart(value: string): string {
 }
 
 function buildExportFilename(index: number, email: string, accountId: string): string {
-  const parts = [
-    `record-${String(index + 1).padStart(4, '0')}`,
-    sanitizeFilenamePart(email),
-    sanitizeFilenamePart(accountId),
-  ].filter(Boolean);
-  return `${parts.join('_') || `record-${String(index + 1).padStart(4, '0')}`}.json`;
+  const emailPart = sanitizeFilenamePart(email);
+  if (emailPart) return `${emailPart}.json`;
+  const accountPart = sanitizeFilenamePart(accountId);
+  if (accountPart) return `${accountPart}.json`;
+  return `record-${String(index + 1).padStart(4, '0')}.json`;
 }
 
-function getStatusBadge(result: AccountUsageResult | undefined) {
-  if (!result) return { variant: 'muted' as const, label: '未检测' };
-  if (result.status === 'ok') return { variant: 'success' as const, label: '正常' };
-  if (result.status === 'rate_limited') return { variant: 'warning' as const, label: '限流' };
-  if (result.status === 'token_invalid') return { variant: 'destructive' as const, label: 'Token失效' };
-  return { variant: 'destructive' as const, label: '错误' };
+function getStatusBadge(result: AccountUsageResult | undefined, thresholds: DetectThresholds) {
+  const category = categorizeResult(result, thresholds);
+  if (category === 'unchecked') return { variant: 'muted' as const, label: '未检测' };
+  if (category === 'rate_limited') return { variant: 'warning' as const, label: '限流' };
+  if (category === 'token_invalid') return { variant: 'destructive' as const, label: 'Token失效' };
+  if (category === 'error') return { variant: 'destructive' as const, label: '错误' };
+  if (category === 'unused') return { variant: 'success' as const, label: '未使用' };
+  return { variant: 'info' as const, label: '已使用' };
 }
 
 export default function DetectPage() {
   const { notify } = useFeedback();
 
   const [profiles, setProfiles] = useState<DataProfileItem[]>([]);
+  const [thresholds, setThresholds] = useState<DetectThresholds>(DEFAULT_DETECT_THRESHOLDS);
   const [selectedProfileId, setSelectedProfileId] = useState('');
   const [parsedData, setParsedData] = useState<ParsedData | null>(null);
   const [records, setRecords] = useState<ParsedRecordPage['records']>([]);
@@ -212,22 +258,30 @@ export default function DetectPage() {
   const [statusFilter, setStatusFilter] = useState<ProbeStatusFilter>('');
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState('');
+  const [fiveHourMin, setFiveHourMin] = useState('');
+  const [fiveHourMax, setFiveHourMax] = useState('');
+  const [sevenDayMin, setSevenDayMin] = useState('');
+  const [sevenDayMax, setSevenDayMax] = useState('');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(100);
   const [exporting, setExporting] = useState(false);
+  const [pendingExport, setPendingExport] = useState<{
+    rows: DerivedRow[];
+    title: string;
+    slug: string;
+  } | null>(null);
   const [importPlanTypePreset, setImportPlanTypePreset] = useState('');
   const [importPlanTypeCustom, setImportPlanTypeCustom] = useState('');
-  const [exportPlanTypePreset, setExportPlanTypePreset] = useState('');
-  const [exportPlanTypeCustom, setExportPlanTypeCustom] = useState('');
-
   const planTypeOverride = resolvePlanTypeOverride(importPlanTypePreset, importPlanTypeCustom);
-  const exportPlanTypeOverride = resolvePlanTypeOverride(exportPlanTypePreset, exportPlanTypeCustom);
 
   useEffect(() => {
     get<DataProfileItem[]>('/profiles').then(setProfiles);
+    get<{ detectThresholds?: DetectThresholds }>('/settings').then((settings) => {
+      if (settings.detectThresholds) setThresholds(settings.detectThresholds);
+    }).catch(() => { /* 用默认值即可 */ });
   }, []);
 
-  async function loadAllRecords(fileId: string, totalRecords: number) {
+  async function loadAllRecords(fileId: string, totalRecords: number, preserveSelection = false) {
     setLoadingRecords(true);
     try {
       const all: ParsedRecordPage['records'] = [];
@@ -238,25 +292,69 @@ export default function DetectPage() {
         if (pageData.records.length < limit) break;
       }
       setRecords(all);
-      setSelectedRows(new Set(all.map((record) => record.index)));
+      if (!preserveSelection) {
+        setSelectedRows(new Set(all.map((record) => record.index)));
+      } else {
+        setSelectedRows((current) => {
+          const next = new Set(current);
+          const knownIndices = new Set(records.map((r) => r.index));
+          for (const rec of all) {
+            if (!knownIndices.has(rec.index)) next.add(rec.index);
+          }
+          return next;
+        });
+      }
     } finally {
       setLoadingRecords(false);
     }
   }
 
-  async function handleFileUpload(fileList: FileList | null) {
+  async function handleFileUpload(fileList: FileList | null, mode: 'replace' | 'append' = 'replace') {
     if (!fileList || fileList.length === 0) return;
     setUploading(true);
     setUploadError('');
-    setParsedData(null);
-    setRecords([]);
-    setProbeResults(new Map());
-    setSelectedRows(new Set());
-    setProcessedCount(0);
-    setActiveProbeIndices(new Set());
-    setPage(0);
+
+    if (mode === 'replace') {
+      setParsedData(null);
+      setRecords([]);
+      setProbeResults(new Map());
+      setSelectedRows(new Set());
+      setProcessedCount(0);
+      setActiveProbeIndices(new Set());
+      setPage(0);
+    }
 
     try {
+      if (mode === 'append' && parsedData) {
+        const formData = new FormData();
+        for (let index = 0; index < fileList.length; index++) {
+          formData.append('files', fileList[index]);
+        }
+        const result = await upload<{
+          fileId: string;
+          totalRecords: number;
+          added: number;
+          duplicated: number;
+          detectedFields: string[];
+          parseWarnings: string[];
+        }>(`/data/append/${parsedData.fileId}`, formData);
+
+        setParsedData((current) => current ? {
+          ...current,
+          totalRecords: result.totalRecords,
+          detectedFields: Array.from(new Set([...current.detectedFields, ...result.detectedFields])),
+          parseWarnings: [...current.parseWarnings, ...result.parseWarnings],
+          fileCount: (current.fileCount ?? 1) + fileList.length,
+        } : current);
+        await loadAllRecords(result.fileId, result.totalRecords, true);
+        notify({
+          tone: 'success',
+          title: '追加完成',
+          description: `新增 ${result.added} 条${result.duplicated > 0 ? `，跳过重复 ${result.duplicated} 条` : ''}`,
+        });
+        return;
+      }
+
       const formData = new FormData();
       let data: ParsedData;
       if (fileList.length === 1) {
@@ -289,8 +387,9 @@ export default function DetectPage() {
     }
   }
 
-  const derivedRows = records.map((record) => {
+  const derivedRows: DerivedRow[] = records.map((record) => {
     const target = extractProbeTarget(record.fields, fieldMapping, planTypeOverride);
+    const result = probeResults.get(record.index);
     return {
       index: record.index,
       fields: record.fields,
@@ -298,14 +397,35 @@ export default function DetectPage() {
       accountId: target.accountId ?? '',
       planType: target.planType ?? '',
       accessToken: target.accessToken,
-      result: probeResults.get(record.index),
+      result,
+      category: categorizeResult(result, thresholds),
     };
   });
 
+  const categoryCounts = derivedRows.reduce<Record<UsageCategory, number>>((acc, row) => {
+    acc[row.category] = (acc[row.category] ?? 0) + 1;
+    return acc;
+  }, { unused: 0, used: 0, rate_limited: 0, token_invalid: 0, error: 0, unchecked: 0 });
+
+  const usageRange = {
+    fiveHourMin: fiveHourMin.trim() === '' ? null : Number(fiveHourMin),
+    fiveHourMax: fiveHourMax.trim() === '' ? null : Number(fiveHourMax),
+    sevenDayMin: sevenDayMin.trim() === '' ? null : Number(sevenDayMin),
+    sevenDayMax: sevenDayMax.trim() === '' ? null : Number(sevenDayMax),
+  };
+  const usageRangeActive = Object.values(usageRange).some((v) => v !== null && !Number.isNaN(v));
+
   const visibleRows = derivedRows.filter((row) => {
-    if (statusFilter === 'unchecked' && row.result) return false;
-    if (statusFilter && statusFilter !== 'unchecked' && row.result?.status !== statusFilter) return false;
+    if (statusFilter && row.category !== statusFilter) return false;
     if (planFilter && row.planType !== planFilter) return false;
+    if (usageRangeActive) {
+      const usage = row.result?.usage;
+      if (!usage) return false;
+      if (usageRange.fiveHourMin !== null && !Number.isNaN(usageRange.fiveHourMin) && usage.fiveHourUsed < usageRange.fiveHourMin) return false;
+      if (usageRange.fiveHourMax !== null && !Number.isNaN(usageRange.fiveHourMax) && usage.fiveHourUsed > usageRange.fiveHourMax) return false;
+      if (usageRange.sevenDayMin !== null && !Number.isNaN(usageRange.sevenDayMin) && usage.sevenDayUsed < usageRange.sevenDayMin) return false;
+      if (usageRange.sevenDayMax !== null && !Number.isNaN(usageRange.sevenDayMax) && usage.sevenDayUsed > usageRange.sevenDayMax) return false;
+    }
     if (search) {
       const keyword = search.trim().toLowerCase();
       const text = `${row.email} ${row.accountId} ${row.planType}`.toLowerCase();
@@ -321,7 +441,7 @@ export default function DetectPage() {
 
   useEffect(() => {
     setPage(0);
-  }, [statusFilter, planFilter, search]);
+  }, [statusFilter, planFilter, search, fiveHourMin, fiveHourMax, sevenDayMin, sevenDayMax]);
 
   async function handleDetectAll() {
     if (!parsedData || records.length === 0) return;
@@ -432,48 +552,97 @@ export default function DetectPage() {
     }
   }
 
-  async function handleExportSelected() {
-    if (!parsedData || selectedRows.size === 0) {
+  async function sendExport(
+    rows: typeof derivedRows,
+    options: ExportOptions,
+    downloadSlug: string,
+  ) {
+    if (!parsedData || rows.length === 0) return;
+
+    const items = rows.map((row) => ({
+      index: row.index,
+      filename: buildExportFilename(row.index, row.email, row.accountId),
+      email: row.email,
+      accountId: row.accountId,
+      planType: options.planTypeOverride || row.planType || undefined,
+      planField: fieldMapping.plan_type || undefined,
+    }));
+
+    const downloadName = `${downloadSlug}-${options.format}${options.mode === 'merged' ? '-merged' : ''}-${new Date().toISOString().slice(0, 10)}`;
+
+    const response = await fetch('/api/data/export-accounts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getApiKeyHeader(),
+      },
+      body: JSON.stringify({
+        fileId: parsedData.fileId,
+        format: options.format,
+        mode: options.mode,
+        downloadName,
+        items,
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+      throw new Error(payload.error ?? `HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const ext = options.mode === 'merged' ? 'json' : 'zip';
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${downloadName}.${ext}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    notify({
+      tone: 'success',
+      title: '导出完成',
+      description: options.mode === 'merged'
+        ? `已合并导出 ${items.length} 条记录为单个 JSON`
+        : `已导出 ${items.length} 个 JSON 文件`,
+    });
+  }
+
+  function openExportDialogForSelected() {
+    if (!parsedData) return;
+    if (selectedRows.size === 0) {
       notify({ tone: 'error', title: '无法导出', description: '请先勾选要导出的数据' });
       return;
     }
+    setPendingExport({
+      rows: derivedRows.filter((row) => selectedRows.has(row.index)),
+      title: `导出勾选的 ${selectedRows.size} 条记录`,
+      slug: 'detected-records',
+    });
+  }
 
+  function openExportDialogForCategory(category: UsageCategory) {
+    if (!parsedData) return;
+    const rows = derivedRows.filter((row) => row.category === category);
+    const meta = CATEGORY_META[category];
+    if (rows.length === 0) {
+      notify({ tone: 'error', title: '无法导出', description: `��前没有${meta.label}的账号` });
+      return;
+    }
+    setPendingExport({
+      rows,
+      title: `导出「${meta.label}」账号（${rows.length} 条）`,
+      slug: `detected-${meta.filename}`,
+    });
+  }
+
+  async function handleExportConfirm(options: ExportOptions) {
+    if (!pendingExport) return;
     setExporting(true);
     try {
-      const items = derivedRows
-        .filter((row) => selectedRows.has(row.index))
-        .map((row) => ({
-          index: row.index,
-          filename: buildExportFilename(row.index, row.email, row.accountId),
-          planType: exportPlanTypeOverride || row.planType || undefined,
-          planField: fieldMapping.plan_type || undefined,
-        }));
-
-      const response = await fetch('/api/data/export-zip', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getApiKeyHeader(),
-        },
-        body: JSON.stringify({ fileId: parsedData.fileId, items }),
-      });
-
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-        throw new Error(payload.error ?? `HTTP ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `detected-records-${new Date().toISOString().slice(0, 10)}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-
-      notify({ tone: 'success', title: '导出完成', description: `已导出 ${items.length} 个 JSON 文件` });
+      await sendExport(pendingExport.rows, options, pendingExport.slug);
     } catch (err) {
       notify({ tone: 'error', title: '导出失败', description: (err as Error).message });
     } finally {
@@ -528,15 +697,37 @@ export default function DetectPage() {
           accept=".json,.csv,.tsv"
           multiple
           disabled={uploading || probing}
-          onFiles={(files) => { void handleFileUpload(files); }}
+          onFiles={(files) => { void handleFileUpload(files, parsedData ? 'append' : 'replace'); }}
         >
-          {uploading ? <p>解析中...</p> : (
+          {uploading ? <p>解析中...</p> : parsedData ? (
+            <div>
+              <p className="text-base mb-2">拖拽或点击继续追加文件</p>
+              <p className="text-muted-foreground text-xs">
+                新记录会追加到现有列表，按 email / access_token 自动去重，已检测结果保留
+              </p>
+            </div>
+          ) : (
             <div>
               <p className="text-base mb-2">拖拽或点击选择文件</p>
               <p className="text-muted-foreground text-xs">导入后不会推送，只用于检测与导出</p>
             </div>
           )}
         </FileTrigger>
+
+        {parsedData && (
+          <div className="mt-3 flex justify-end">
+            <FileTrigger
+              accept=".json,.csv,.tsv"
+              multiple
+              disabled={uploading || probing}
+              onFiles={(files) => { void handleFileUpload(files, 'replace'); }}
+            >
+              <Button size="sm" variant="ghost" disabled={uploading || probing}>
+                清空并重新导入
+              </Button>
+            </FileTrigger>
+          </div>
+        )}
 
         {uploadError && <p className="text-destructive mt-3">{uploadError}</p>}
 
@@ -598,37 +789,49 @@ export default function DetectPage() {
         <Card className="p-5">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div>
-              <h3 className="text-base font-semibold">字段映射</h3>
-              <p className="text-xs text-muted-foreground mt-1">检测只需要下面这些字段</p>
+              <h3 className="text-base font-semibold">开始检测</h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                当前字段映射：
+                {['access_token', 'email', 'account_id', 'plan_type']
+                  .map((f) => `${f} → ${fieldMapping[f] || '未映射'}`)
+                  .join('；')}
+              </p>
             </div>
             <Button size="sm" variant="primary" onClick={() => { void handleDetectAll(); }} loading={probing} disabled={loadingRecords || records.length === 0}>
               {probing ? '检测中...' : '开始检测'}
             </Button>
           </div>
 
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>标准字段</TableHead>
-                <TableHead>数据源字段</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {['access_token', 'email', 'account_id', 'plan_type'].map((field) => (
-                <TableRow key={field}>
-                  <TableCell className="font-medium">{field}</TableCell>
-                  <TableCell>
-                    <SelectField
-                      value={fieldMapping[field] ?? ''}
-                      onChange={(value) => setFieldMapping((current) => ({ ...current, [field]: value }))}
-                      options={[{ value: '', label: '-- 不映射 --' }, ...parsedData.detectedFields.map((item) => ({ value: item, label: item }))]}
-                      className="w-full"
-                    />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <details className="rounded-lg border border-border">
+            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-muted-foreground hover:text-foreground">
+              调整字段映射
+            </summary>
+            <div className="px-3 pb-3">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>标准字段</TableHead>
+                    <TableHead>数据源字段</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {['access_token', 'email', 'account_id', 'plan_type'].map((field) => (
+                    <TableRow key={field}>
+                      <TableCell className="font-medium">{field}</TableCell>
+                      <TableCell>
+                        <SelectField
+                          value={fieldMapping[field] ?? ''}
+                          onChange={(value) => setFieldMapping((current) => ({ ...current, [field]: value }))}
+                          options={[{ value: '', label: '-- 不映射 --' }, ...parsedData.detectedFields.map((item) => ({ value: item, label: item }))]}
+                          className="w-full"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </details>
 
           {(probing || processedCount > 0) && (
             <div className="mt-4 space-y-2">
@@ -639,6 +842,42 @@ export default function DetectPage() {
               <Progress value={progressValue} />
             </div>
           )}
+        </Card>
+      )}
+
+      {parsedData && processedCount > 0 && (
+        <Card className="p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div>
+              <h3 className="text-base font-semibold">按分类一键导出</h3>
+              <p className="text-xs text-muted-foreground mt-1">
+                未使用 = 5h 用量 ≤ {thresholds.unusedFiveHourMaxPercent}% 且 7d 用量 &lt; {thresholds.unusedSevenDayMaxPercent}%；限流 = 5h 或 7d = 100%（可在「设置」页修改阈值）
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
+            {(['unused', 'used', 'rate_limited', 'token_invalid', 'error'] as UsageCategory[]).map((category) => {
+              const meta = CATEGORY_META[category];
+              const count = categoryCounts[category] ?? 0;
+              const primary = category === 'unused';
+              return (
+                <div key={category} className="rounded-lg border border-border p-3 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs text-muted-foreground">{meta.label}</div>
+                    <div className="text-lg font-semibold">{count}</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={primary ? 'primary' : 'default'}
+                    disabled={count === 0 || exporting}
+                    onClick={() => { openExportDialogForCategory(category); }}
+                  >
+                    导出
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
         </Card>
       )}
 
@@ -657,7 +896,8 @@ export default function DetectPage() {
               options={[
                 { value: '', label: '全部状态' },
                 { value: 'unchecked', label: '未检测' },
-                { value: 'ok', label: '正常' },
+                { value: 'unused', label: `未使用 (5h≤${thresholds.unusedFiveHourMaxPercent}% · 7d<${thresholds.unusedSevenDayMaxPercent}%)` },
+                { value: 'used', label: '已使用' },
                 { value: 'rate_limited', label: '限流' },
                 { value: 'token_invalid', label: 'Token失效' },
                 { value: 'error', label: '错误' },
@@ -670,34 +910,63 @@ export default function DetectPage() {
               options={[{ value: '', label: '全部 Plan' }, ...planOptions.map((item) => ({ value: item, label: item }))]}
               style={{ width: 160 }}
             />
+            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+              <span>5h %</span>
+              <TextField
+                value={fiveHourMin}
+                onChange={(e) => setFiveHourMin(e.target.value)}
+                placeholder="min"
+                className="w-[70px]"
+              />
+              <span>~</span>
+              <TextField
+                value={fiveHourMax}
+                onChange={(e) => setFiveHourMax(e.target.value)}
+                placeholder="max"
+                className="w-[70px]"
+              />
+            </div>
+            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+              <span>7d %</span>
+              <TextField
+                value={sevenDayMin}
+                onChange={(e) => setSevenDayMin(e.target.value)}
+                placeholder="min"
+                className="w-[70px]"
+              />
+              <span>~</span>
+              <TextField
+                value={sevenDayMax}
+                onChange={(e) => setSevenDayMax(e.target.value)}
+                placeholder="max"
+                className="w-[70px]"
+              />
+            </div>
+            {usageRangeActive && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setFiveHourMin('');
+                  setFiveHourMax('');
+                  setSevenDayMin('');
+                  setSevenDayMax('');
+                }}
+              >
+                清空范围
+              </Button>
+            )}
             <Button size="sm" onClick={() => setSelectedRows(new Set(visibleRows.map((row) => row.index)))} disabled={visibleRows.length === 0}>
               全选筛选
             </Button>
             <Button size="sm" onClick={() => setSelectedRows(new Set())} disabled={selectedRows.size === 0}>
               清空勾选
             </Button>
-            <div className="min-w-[160px]">
-              <SelectField
-                value={exportPlanTypePreset}
-                onChange={setExportPlanTypePreset}
-                options={EXPORT_PLAN_TYPE_OPTIONS}
-              />
-            </div>
-            {exportPlanTypePreset === '__custom__' && (
-              <div className="w-[160px]">
-                <TextField
-                  value={exportPlanTypeCustom}
-                  onChange={(event) => setExportPlanTypeCustom(event.target.value)}
-                  placeholder="导出自定义类型"
-                  size="sm"
-                />
-              </div>
-            )}
-            <Button size="sm" variant="primary" onClick={() => { void handleExportSelected(); }} loading={exporting} disabled={selectedRows.size === 0}>
+            <Button size="sm" variant="primary" onClick={() => { openExportDialogForSelected(); }} loading={exporting} disabled={selectedRows.size === 0}>
               导出勾选 ({selectedRows.size})
             </Button>
             <span className="text-xs text-muted-foreground ml-auto">
-              当前 {visibleRows.length} 条，可导出 {selectedRows.size} 条{exportPlanTypeOverride ? `，导出类型 ${exportPlanTypeOverride}` : ''}
+              当前 {visibleRows.length} 条，可导出 {selectedRows.size} 条
             </span>
           </div>
 
@@ -741,7 +1010,7 @@ export default function DetectPage() {
                     </TableCell>
                   </TableRow>
                 ) : pagedRows.map((row) => {
-                  const badge = getStatusBadge(row.result);
+                  const badge = getStatusBadge(row.result, thresholds);
                   const active = activeProbeIndices.has(row.index);
                   return (
                     <TableRow key={row.index}>
@@ -793,6 +1062,14 @@ export default function DetectPage() {
           <Pagination page={page} pageSize={pageSize} total={visibleRows.length} onPageChange={setPage} onPageSizeChange={setPageSize} />
         </Card>
       )}
+
+      <ExportDialog
+        open={pendingExport !== null}
+        onOpenChange={(open) => { if (!open) setPendingExport(null); }}
+        title={pendingExport?.title ?? '导出账号数据'}
+        count={pendingExport?.rows.length ?? 0}
+        onConfirm={handleExportConfirm}
+      />
     </div>
   );
 }

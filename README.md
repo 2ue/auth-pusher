@@ -20,7 +20,7 @@
 
 ## 环境要求
 
-- Node.js 22.x（`.nvmrc` 已指定）
+- Node.js >= 20（`.nvmrc` 指定 20）
 - pnpm 9+
 
 ## 快速开始

@@ -13,12 +13,17 @@ interface PlanQuota {
   sevenDayUnits: number;
   knivesPerUnit: number;
 }
+interface DetectThresholds {
+  unusedFiveHourMaxPercent: number;
+  unusedSevenDayMaxPercent: number;
+}
 interface AppSettings {
   pushIntervalMs: number;
   pushConcurrency: number;
   defaultProbeModel: string;
   defaultTestModel: string;
   planQuotas: Record<string, PlanQuota>;
+  detectThresholds: DetectThresholds;
   apiKey?: string;
   webhookUrl?: string;
 }
@@ -33,6 +38,10 @@ const DEFAULTS: AppSettings = {
     plus: { fiveHourUnits: 80, sevenDayUnits: 1000, knivesPerUnit: 1 },
     pro: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
     team: { fiveHourUnits: 500, sevenDayUnits: 5000, knivesPerUnit: 1 },
+  },
+  detectThresholds: {
+    unusedFiveHourMaxPercent: 2,
+    unusedSevenDayMaxPercent: 1,
   },
 };
 
@@ -163,6 +172,43 @@ export default function SettingsPage() {
                 options={buildOpenAiModelOptions(settings.defaultTestModel)}
               />
               <p className="text-xs text-muted-foreground mt-1">单条“测试调用”打开弹窗后可临时改模型，批量测试默认用这里。</p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-5">
+          <h3 className="text-sm font-semibold mb-1">独立检测分类阈值</h3>
+          <p className="text-xs text-muted-foreground mb-4">
+            决定「独立检测」页中「未使用」的判定标准。状态正常时，5h 用量 ≤ 以下阈值 且 7d 用量 &lt; 以下阈值 的账号归类为「未使用」，其余归为「已使用」。
+          </p>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1.5">5h 用量最大值 (%)</label>
+              <NumberField
+                value={settings.detectThresholds.unusedFiveHourMaxPercent}
+                min={0}
+                max={100}
+                step={0.5}
+                onChangeValue={(v) => setSettings((s) => ({
+                  ...s,
+                  detectThresholds: { ...s.detectThresholds, unusedFiveHourMaxPercent: Math.min(100, Math.max(0, Number(v || 0))) },
+                }))}
+              />
+              <p className="text-xs text-muted-foreground mt-1">允许的上界（含），探测本身会消耗少量额度，留 1-2% 余量更稳</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1.5">7d 用量最大值 (%)</label>
+              <NumberField
+                value={settings.detectThresholds.unusedSevenDayMaxPercent}
+                min={0}
+                max={100}
+                step={0.5}
+                onChangeValue={(v) => setSettings((s) => ({
+                  ...s,
+                  detectThresholds: { ...s.detectThresholds, unusedSevenDayMaxPercent: Math.min(100, Math.max(0, Number(v || 0))) },
+                }))}
+              />
+              <p className="text-xs text-muted-foreground mt-1">严格 &lt; 此值才算未使用（周限更敏感，建议 1%）</p>
             </div>
           </div>
         </Card>

@@ -11,6 +11,117 @@ import { defaultRegistry } from '../pushers/index.js';
 import { matchProfile } from '../persistence/profile.store.js';
 import * as fileStore from '../persistence/file.store.js';
 import type { ParsedData, ParsedRecordPage, RawRecord } from '../../../shared/types/data.js';
+import { decodeOpenAiJwt } from '../utils/jwt.js';
+
+const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+
+type ExportFormat = 'raw' | 'cpa' | 'sub2api';
+type ExportMode = 'individual' | 'merged';
+
+interface ExportItemInput {
+  index?: number;
+  filename?: string;
+  planType?: string;
+  planField?: string;
+  email?: string;
+  accountId?: string;
+}
+
+function pickField(fields: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const direct = fields[key];
+    if (direct != null && String(direct).trim()) return String(direct);
+    if (key.includes('.')) {
+      const parts = key.split('.');
+      let current: unknown = fields;
+      for (const part of parts) {
+        if (!current || typeof current !== 'object' || Array.isArray(current)) { current = undefined; break; }
+        current = (current as Record<string, unknown>)[part];
+      }
+      if (current != null && String(current).trim()) return String(current);
+    }
+  }
+  return '';
+}
+
+/** 原始 Token 文件格式：扁平 JSON，含 plan_type（与 dp-auth-raw profile 对齐） */
+function formatRaw(fields: Record<string, unknown>): Record<string, unknown> {
+  const email = pickField(fields, ['email', 'Email', 'extra.email']);
+  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
+  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
+  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
+  const accountId = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
+  const planType = pickField(fields, ['plan_type', 'planType', 'credentials.plan_type']);
+
+  const out: Record<string, unknown> = { email, access_token: accessToken };
+  if (refreshToken) out.refresh_token = refreshToken;
+  if (idToken) out.id_token = idToken;
+  if (accountId) out.account_id = accountId;
+  if (planType) out.plan_type = planType;
+  return out;
+}
+
+/** CPA (CliproxyCLI) 上传格式：与 cpa-upload.pusher.ts 构造的文件一致，不含 plan_type */
+function formatCpa(fields: Record<string, unknown>): Record<string, unknown> {
+  const email = pickField(fields, ['email', 'Email', 'extra.email']);
+  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
+  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
+  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
+  const sessionToken = pickField(fields, ['session_token', 'sessionToken']);
+  const accountId = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
+
+  const out: Record<string, unknown> = { email, access_token: accessToken };
+  if (refreshToken) out.refresh_token = refreshToken;
+  if (idToken) out.id_token = idToken;
+  if (sessionToken) out.session_token = sessionToken;
+  if (accountId) out.account_id = accountId;
+  return out;
+}
+
+/** SUB2API 导出格式：完整 OAuth account payload（与 Sub2ApiPusher.buildRequest 对齐） */
+function formatSub2Api(fields: Record<string, unknown>): Record<string, unknown> {
+  const email = pickField(fields, ['email', 'Email', 'extra.email']);
+  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
+  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
+  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
+  const accountIdField = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
+  const organizationIdField = pickField(fields, ['organization_id', 'organizationId', 'credentials.organization_id']);
+  const planTypeField = pickField(fields, ['plan_type', 'planType', 'credentials.plan_type']);
+
+  const atClaims = decodeOpenAiJwt(accessToken);
+  const itClaims = decodeOpenAiJwt(idToken);
+
+  const chatgptAccountId = accountIdField || atClaims.accountId;
+  const chatgptUserId = atClaims.userId;
+  const organizationId = organizationIdField || itClaims.organizationId;
+  const planType = planTypeField || atClaims.planType || itClaims.planType;
+
+  const credentials: Record<string, unknown> = {
+    access_token: accessToken,
+    client_id: OAUTH_CLIENT_ID,
+  };
+  if (atClaims.exp > 0) credentials.expires_at = new Date(atClaims.exp * 1000).toISOString();
+  if (refreshToken) credentials.refresh_token = refreshToken;
+  if (idToken) credentials.id_token = idToken;
+  if (chatgptAccountId) credentials.chatgpt_account_id = chatgptAccountId;
+  if (chatgptUserId) credentials.chatgpt_user_id = chatgptUserId;
+  if (organizationId) credentials.organization_id = organizationId;
+  if (planType) credentials.plan_type = planType;
+
+  return {
+    name: email,
+    platform: 'openai',
+    type: 'oauth',
+    credentials,
+    extra: { email },
+  };
+}
+
+function formatRecord(format: ExportFormat, fields: Record<string, unknown>): Record<string, unknown> {
+  if (format === 'sub2api') return formatSub2Api(fields);
+  if (format === 'cpa') return formatCpa(fields);
+  return formatRaw(fields);
+}
 
 const uploadDir = path.join(getDataDir(), 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -147,7 +258,89 @@ dataRoutes.get('/records/:fileId', (req, res) => {
   }
 });
 
-/** 按选中记录导出 zip，每条记录一个 json 文件 */
+/** 通用账号导出：支持 raw / sub2api 两种格式，individual (zip) / merged (单 JSON) 两种模式 */
+dataRoutes.post('/export-accounts', (req, res) => {
+  try {
+    const fileId = String(req.body?.fileId ?? '').trim();
+    const rawFormat = String(req.body?.format ?? 'raw').trim().toLowerCase();
+    const format: ExportFormat = rawFormat === 'sub2api' ? 'sub2api' : rawFormat === 'cpa' ? 'cpa' : 'raw';
+    const rawMode = String(req.body?.mode ?? 'individual').trim().toLowerCase();
+    const mode: ExportMode = rawMode === 'merged' ? 'merged' : 'individual';
+    const downloadName = String(req.body?.downloadName ?? '').trim();
+    const items = Array.isArray(req.body?.items) ? (req.body.items as ExportItemInput[]) : [];
+
+    if (!fileId) return res.status(400).json({ error: '缺少 fileId' });
+    if (items.length === 0) return res.status(400).json({ error: '缺少导出项' });
+
+    const records = readMergedRecords(fileId);
+    const picked = items
+      .map((item, order) => {
+        const index = Number(item.index);
+        if (!Number.isInteger(index) || index < 0 || index >= records.length) return null;
+        const overridden = applyExportOverrides(records[index].fields, {
+          planType: item.planType,
+          planField: item.planField,
+        });
+        return {
+          index,
+          order,
+          filename: String(item.filename ?? '').trim(),
+          email: String(item.email ?? '').trim(),
+          accountId: String(item.accountId ?? '').trim(),
+          fields: overridden,
+        };
+      })
+      .filter((item): item is { index: number; order: number; filename: string; email: string; accountId: string; fields: Record<string, unknown> } => Boolean(item));
+
+    if (picked.length === 0) return res.status(400).json({ error: '没有有效的导出记录' });
+
+    const dateSlug = new Date().toISOString().slice(0, 10);
+
+    if (mode === 'merged') {
+      const payloads = picked.map((item) => formatRecord(format, item.fields));
+      const body = format === 'sub2api'
+        ? JSON.stringify({ accounts: payloads }, null, 2)
+        : JSON.stringify(payloads, null, 2);
+      const fileName = (downloadName || `detected-${format}-merged-${dateSlug}`).replace(/\.json$/i, '') + '.json';
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+      return res.end(body);
+    }
+
+    const zipName = (downloadName || `detected-${format}-${dateSlug}`).replace(/\.zip$/i, '') + '.zip';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', (err) => {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+      else res.end();
+    });
+    archive.pipe(res);
+
+    const usedNames = new Set<string>();
+    for (const item of picked) {
+      const fallback = `record-${String(item.index + 1).padStart(4, '0')}.json`;
+      let filename = sanitizeExportName(item.filename, fallback);
+      if (usedNames.has(filename)) {
+        const ext = path.extname(filename) || '.json';
+        const name = filename.slice(0, -ext.length);
+        let suffix = 2;
+        while (usedNames.has(`${name}-${suffix}${ext}`)) suffix++;
+        filename = `${name}-${suffix}${ext}`;
+      }
+      usedNames.add(filename);
+      const payload = formatRecord(format, item.fields);
+      archive.append(JSON.stringify(payload, null, 2), { name: filename });
+    }
+
+    void archive.finalize();
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+/** @deprecated 保留兼容，行为等同 raw + individual 的 export-accounts */
 dataRoutes.post('/export-zip', (req, res) => {
   try {
     const fileId = String(req.body?.fileId ?? '').trim();
@@ -248,6 +441,86 @@ dataRoutes.post('/parse', upload.single('file'), (req, res) => {
     });
 
     res.json({ ...result, batchId });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+/** 追加解析：把新文件解析结果按 access_token/email 去重合并到已有 fileId */
+function dedupeKey(fields: Record<string, unknown>): string {
+  const access = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
+  if (access) return `at:${access}`;
+  const email = pickField(fields, ['email', 'Email', 'extra.email']);
+  if (email) return `em:${email.toLowerCase()}`;
+  return '';
+}
+
+dataRoutes.post('/append/:fileId', upload.array('files', 500), (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (!files || files.length === 0) return res.status(400).json({ error: '请上传文件' });
+
+    const safeFileId = path.basename(String(req.params.fileId ?? ''));
+    const mergedPath = path.join(uploadDir, safeFileId);
+    if (!fs.existsSync(mergedPath)) return res.status(404).json({ error: '原始文件不存在，请重新上传' });
+
+    const existing = readMergedRecords(safeFileId).map((r) => r.fields);
+    const keys = new Set<string>();
+    for (const fields of existing) {
+      const key = dedupeKey(fields);
+      if (key) keys.add(key);
+    }
+
+    const fileItems = files.map((f) => ({
+      filename: f.originalname,
+      content: fs.readFileSync(f.path, 'utf-8'),
+    }));
+    const { records: parsed, warnings } = files.length === 1
+      ? (() => {
+          const fileType = detectFileType(files[0].originalname);
+          const r = parseFileContent(fileItems[0].content, fileType);
+          return { records: r.records, warnings: r.warnings };
+        })()
+      : parseMultipleFiles(fileItems);
+
+    let added = 0;
+    let duplicated = 0;
+    const merged = [...existing];
+    for (const record of parsed) {
+      const key = dedupeKey(record.fields);
+      if (key && keys.has(key)) {
+        duplicated += 1;
+        continue;
+      }
+      if (key) keys.add(key);
+      merged.push(record.fields);
+      added += 1;
+    }
+
+    fs.writeFileSync(mergedPath, JSON.stringify(merged, null, 2), 'utf-8');
+
+    const now = new Date().toISOString();
+    const batchId = safeFileId.replace(/\.\w+$/, '');
+    fileStore.upsertMany(files.map((f) => ({
+      id: nanoid(12),
+      batchId,
+      originalName: f.originalname,
+      storedName: f.filename,
+      size: f.size,
+      mimeType: f.mimetype,
+      uploadedAt: now,
+      associatedTaskIds: [] as string[],
+    })));
+
+    const detectedFields = extractFieldNames(merged.map((fields, index) => ({ index, fields })));
+    res.json({
+      fileId: safeFileId,
+      totalRecords: merged.length,
+      added,
+      duplicated,
+      detectedFields,
+      parseWarnings: warnings,
+    });
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
   }
