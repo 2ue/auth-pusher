@@ -127,7 +127,7 @@ export async function executeTransfer(input: {
       }
 
       // Step 4: Local soft delete + tag
-      accountStore.softDelete(account.id);
+      accountStore.softDelete(account.id, 'transfer');
       const tags = [...new Set([...(account.tags || []), `transferred:${targetChannel.name}`])];
       accountStore.updateTags(account.id, tags);
 

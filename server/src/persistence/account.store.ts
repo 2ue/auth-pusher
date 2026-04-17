@@ -2,6 +2,8 @@ import type { Account, AccountQuery, AccountStats } from '../../../shared/types/
 import db from './db.js';
 import * as settingsStore from './settings.store.js';
 
+export type DeleteReason = 'manual' | 'transfer' | 'sync_removed' | 'expired' | 'invalid_token' | '';
+
 interface AccountRow {
   id: string;
   email: string;
@@ -19,7 +21,9 @@ interface AccountRow {
   importedAt: string;
   pushHistory: string;
   lastProbe: string | null;
+  batchId: string;
   deletedAt: string | null;
+  deleteReason: string;
 }
 
 function rowToAccount(row: AccountRow): Account {
@@ -40,7 +44,9 @@ function rowToAccount(row: AccountRow): Account {
     importedAt: row.importedAt,
     pushHistory: JSON.parse(row.pushHistory),
     lastProbe: row.lastProbe ? JSON.parse(row.lastProbe) : null,
+    batchId: row.batchId || undefined,
     deletedAt: row.deletedAt ?? undefined,
+    deleteReason: row.deleteReason || undefined,
   };
 }
 
@@ -165,38 +171,57 @@ export function upsertBatch(incoming: Account[]): { added: number; updated: numb
   return { added, updated };
 }
 
+/** @deprecated 改用 softDelete，保留仅供内部兼容 */
 export function remove(id: string): boolean {
+  return softDelete(id, 'manual');
+}
+
+/** @deprecated 改用 softDeleteBatch */
+export function removeBatch(ids: string[]): number {
+  return softDeleteBatch(ids, 'manual');
+}
+
+// ── Soft delete ────────────────────────────────────────────────
+
+export function softDelete(id: string, reason: DeleteReason = 'manual'): boolean {
+  const result = db.prepare('UPDATE accounts SET deletedAt = ?, deleteReason = ? WHERE id = ? AND deletedAt IS NULL')
+    .run(new Date().toISOString(), reason, id);
+  return result.changes > 0;
+}
+
+export function softDeleteBatch(ids: string[], reason: DeleteReason = 'manual'): number {
+  if (ids.length === 0) return 0;
+  const now = new Date().toISOString();
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`UPDATE accounts SET deletedAt = ?, deleteReason = ? WHERE id IN (${placeholders}) AND deletedAt IS NULL`);
+  const result = stmt.run(now, reason, ...ids);
+  return result.changes;
+}
+
+export function restore(id: string): boolean {
+  const result = db.prepare("UPDATE accounts SET deletedAt = NULL, deleteReason = '' WHERE id = ?").run(id);
+  return result.changes > 0;
+}
+
+export function restoreBatch(ids: string[]): number {
+  if (ids.length === 0) return 0;
+  const placeholders = ids.map(() => '?').join(',');
+  const stmt = db.prepare(`UPDATE accounts SET deletedAt = NULL, deleteReason = '' WHERE id IN (${placeholders})`);
+  const result = stmt.run(...ids);
+  return result.changes;
+}
+
+export function permanentDelete(id: string): boolean {
   const result = stmtDeleteById.run(id);
   return result.changes > 0;
 }
 
-export function removeBatch(ids: string[]): number {
+export function permanentDeleteBatch(ids: string[]): number {
   if (ids.length === 0) return 0;
   const placeholders = ids.map(() => '?').join(',');
   const stmt = db.prepare(`DELETE FROM accounts WHERE id IN (${placeholders})`);
   const result = stmt.run(...ids);
   return result.changes;
-}
-
-// ── Soft delete ────────────────────────────────────────────────
-
-export function softDelete(id: string): boolean {
-  const result = db.prepare('UPDATE accounts SET deletedAt = ? WHERE id = ?').run(new Date().toISOString(), id);
-  return result.changes > 0;
-}
-
-export function softDeleteBatch(ids: string[]): number {
-  if (ids.length === 0) return 0;
-  const now = new Date().toISOString();
-  const placeholders = ids.map(() => '?').join(',');
-  const stmt = db.prepare(`UPDATE accounts SET deletedAt = ? WHERE id IN (${placeholders})`);
-  const result = stmt.run(now, ...ids);
-  return result.changes;
-}
-
-export function restore(id: string): boolean {
-  const result = db.prepare('UPDATE accounts SET deletedAt = NULL WHERE id = ?').run(id);
-  return result.changes > 0;
 }
 
 export function updateTags(id: string, tags: string[]): void {
@@ -214,8 +239,10 @@ function buildFilters(q: Omit<AccountQuery, 'limit' | 'offset'>): FilterResult {
   const conditions: string[] = [];
   const params: unknown[] = [];
 
-  // Soft delete filter: exclude deleted by default
-  if (!q.includeDeleted) {
+  // Soft delete filter
+  if (q.onlyDeleted) {
+    conditions.push('deletedAt IS NOT NULL');
+  } else if (!q.includeDeleted) {
     conditions.push('deletedAt IS NULL');
   }
 
@@ -234,6 +261,10 @@ function buildFilters(q: Omit<AccountQuery, 'limit' | 'offset'>): FilterResult {
     conditions.push('disabled = 1');
   } else if (q.disabled === false) {
     conditions.push('disabled = 0');
+  }
+  if (q.batchId) {
+    conditions.push('batchId = ?');
+    params.push(q.batchId);
   }
   if (q.sourceType) {
     conditions.push('sourceType = ?');

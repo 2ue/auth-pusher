@@ -103,6 +103,29 @@ export default function ConvertPage() {
     }
   }
 
+  /* ── 导入到号池 ── */
+  const [importingToPool, setImportingToPool] = useState(false);
+  async function handleImportToPool() {
+    if (!fileImport.parsedData || totalCount === 0) return;
+    setImportingToPool(true);
+    try {
+      const result = await post<{ added: number; updated: number; skipped: number }>('/data/import-to-pool', {
+        fileId: fileImport.parsedData.fileId,
+        fieldMapping: fileImport.fieldMapping,
+        planTypeOverride: planTypeOverride || undefined,
+      });
+      notify({
+        tone: 'success',
+        title: '导入完成',
+        description: `新增 ${result.added}，更新 ${result.updated}，跳过 ${result.skipped}`,
+      });
+    } catch (err) {
+      notify({ tone: 'error', title: '导入失败', description: (err as Error).message });
+    } finally {
+      setImportingToPool(false);
+    }
+  }
+
   /* ── 刷新 Token ── */
   const [refreshing, setRefreshing] = useState(false);
   const [refreshSummary, setRefreshSummary] = useState<{ ok: number; invalid: number; error: number; skipped: number } | null>(null);
@@ -299,7 +322,14 @@ export default function ConvertPage() {
               </p>
             </div>
 
-            <div className="flex items-center justify-end pt-2 border-t border-border">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
+              <Button
+                onClick={handleImportToPool}
+                loading={importingToPool}
+                disabled={totalCount === 0}
+              >
+                导入到号池
+              </Button>
               <Button
                 variant="primary"
                 onClick={handleExport}

@@ -167,6 +167,28 @@ db.exec(`
     lastTaskId TEXT DEFAULT NULL,
     createdAt TEXT NOT NULL DEFAULT ''
   );
+
+  CREATE TABLE IF NOT EXISTS account_events (
+    id TEXT PRIMARY KEY,
+    accountId TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    eventType TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '{}',
+    createdAt TEXT NOT NULL DEFAULT ''
+  );
+
+  CREATE TABLE IF NOT EXISTS import_batches (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT '',
+    sourceType TEXT NOT NULL DEFAULT 'local',
+    channelId TEXT NOT NULL DEFAULT '',
+    totalCount INTEGER NOT NULL DEFAULT 0,
+    addedCount INTEGER NOT NULL DEFAULT 0,
+    updatedCount INTEGER NOT NULL DEFAULT 0,
+    skippedCount INTEGER NOT NULL DEFAULT 0,
+    files TEXT NOT NULL DEFAULT '[]',
+    createdAt TEXT NOT NULL DEFAULT ''
+  );
 `);
 
 // ── Migrations (must run BEFORE indexes) ──────────────────────
@@ -174,6 +196,12 @@ db.exec(`
 const accountCols = db.prepare("PRAGMA table_info(accounts)").all() as { name: string }[];
 if (!accountCols.some((c) => c.name === 'deletedAt')) {
   db.exec('ALTER TABLE accounts ADD COLUMN deletedAt TEXT DEFAULT NULL');
+}
+if (!accountCols.some((c) => c.name === 'deleteReason')) {
+  db.exec("ALTER TABLE accounts ADD COLUMN deleteReason TEXT NOT NULL DEFAULT ''");
+}
+if (!accountCols.some((c) => c.name === 'batchId')) {
+  db.exec("ALTER TABLE accounts ADD COLUMN batchId TEXT NOT NULL DEFAULT ''");
 }
 
 // ── Indexes ─────────────────────────────────────────────────────
@@ -202,6 +230,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_usage_jobs_status ON usage_jobs(status);
 
   CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_channelId ON scheduled_tasks(channelId);
+
+  CREATE INDEX IF NOT EXISTS idx_account_events_accountId ON account_events(accountId);
+  CREATE INDEX IF NOT EXISTS idx_account_events_eventType ON account_events(eventType);
+  CREATE INDEX IF NOT EXISTS idx_account_events_createdAt ON account_events(createdAt);
+
+  CREATE INDEX IF NOT EXISTS idx_import_batches_createdAt ON import_batches(createdAt);
+  CREATE INDEX IF NOT EXISTS idx_accounts_batchId ON accounts(batchId);
 `);
 
 export default db;

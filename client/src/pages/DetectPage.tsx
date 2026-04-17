@@ -228,6 +228,29 @@ export default function DetectPage() {
     setPage(0);
   }, [statusFilter, planFilter, search, fiveHourMin, fiveHourMax, sevenDayMin, sevenDayMax]);
 
+  /* ── 导入到号池 ── */
+  const [importingToPool, setImportingToPool] = useState(false);
+  async function handleImportToPool() {
+    if (!fileImport.parsedData || fileImport.records.length === 0) return;
+    setImportingToPool(true);
+    try {
+      const result = await post<{ added: number; updated: number; skipped: number }>('/data/import-to-pool', {
+        fileId: fileImport.parsedData.fileId,
+        fieldMapping: fileImport.fieldMapping,
+        planTypeOverride: planTypeOverride || undefined,
+      });
+      notify({
+        tone: 'success',
+        title: '导入完成',
+        description: `新增 ${result.added}，更新 ${result.updated}，跳过 ${result.skipped}`,
+      });
+    } catch (err) {
+      notify({ tone: 'error', title: '导入失败', description: (err as Error).message });
+    } finally {
+      setImportingToPool(false);
+    }
+  }
+
   /* ── 刷新 Token 逻辑 ── */
   const [refreshing, setRefreshing] = useState(false);
   const [refreshSummary, setRefreshSummary] = useState<{ ok: number; invalid: number; error: number; skipped: number } | null>(null);
@@ -631,6 +654,9 @@ export default function DetectPage() {
             </Button>
             <Button size="sm" variant="primary" onClick={() => { openExportDialogForSelected(); }} loading={exporting} disabled={selectedRows.size === 0}>
               导出勾选 ({selectedRows.size})
+            </Button>
+            <Button size="sm" onClick={() => { void handleImportToPool(); }} loading={importingToPool} disabled={fileImport.records.length === 0}>
+              导入到号池
             </Button>
             <span className="text-xs text-muted-foreground ml-auto">
               当前 {visibleRows.length} 条，可导出 {selectedRows.size} 条

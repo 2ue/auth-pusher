@@ -2,6 +2,7 @@ import type { ChannelConfig } from '../../../shared/types/channel.js';
 import * as channelStore from '../persistence/channel.store.js';
 import * as accountStore from '../persistence/account.store.js';
 import * as tagStore from '../persistence/tag.store.js';
+import * as batchStore from '../persistence/batch.store.js';
 import { defaultRegistry } from '../pushers/index.js';
 
 /** 同步标签前缀 */
@@ -61,6 +62,22 @@ export async function syncFromChannel(channelId: string): Promise<{
   // 3. Upsert 远端账号到本地
   const result = accountStore.upsertBatch(remoteAccounts);
 
+  // 3.5 创建导入批次
+  const batch = batchStore.create({
+    source: syncTag,
+    sourceType: 'remote',
+    channelId,
+    totalCount: remoteAccounts.length,
+    addedCount: result.added,
+    updatedCount: result.updated,
+    skippedCount: 0,
+  });
+  const syncedIds = remoteAccounts
+    .map((a) => accountStore.findByEmail(a.email))
+    .filter(Boolean)
+    .map((a) => a!.id);
+  batchStore.setAccountsBatchId(syncedIds, batch.id);
+
   // 4. 检测本地中"远端已删除"的账号（含已软删除的，以避免 save 丢失）
   const allLocal = accountStore.loadAll(true);
   let deletedCount = 0;
@@ -72,17 +89,19 @@ export async function syncFromChannel(channelId: string): Promise<{
     if (!belongsToChannel) continue;
 
     if (!remoteEmails.has(local.email.toLowerCase())) {
-      // 远端已删除：加 deleted 标签
+      // 远端已删除：加 deleted 标签 + 软删除
       if (!tags.includes(deletedTag)) {
         local.tags = [...tags, deletedTag];
         deletedCount++;
         changed = true;
+        accountStore.softDelete(local.id, 'sync_removed');
       }
     } else {
-      // 远端存在：移除 deleted / transferred 标签（如果有）
+      // 远端存在：移除 deleted / transferred 标签，恢复软删除
       if (tags.includes(deletedTag) || tags.includes(transferredTag)) {
         local.tags = tags.filter((t) => t !== deletedTag && t !== transferredTag);
         changed = true;
+        if (local.deletedAt) accountStore.restore(local.id);
       }
     }
   }

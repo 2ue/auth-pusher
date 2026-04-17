@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { get, getWithTotal, post, del, upload, getApiKeyHeader } from '../api/client';
 import { useFeedback } from '../components/FeedbackProvider';
@@ -7,6 +7,7 @@ import { UsageCell } from '../components/UsageBar';
 import QuotaPanel from '../components/QuotaPanel';
 import Pagination from '../components/Pagination';
 import { BatchActionBar } from '../components/BatchActionBar';
+import { EventTimeline } from '../components/EventTimeline';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -233,13 +234,16 @@ export default function AccountPoolPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [searchDraft, setSearchDraft] = useState('');
+  const [batches, setBatches] = useState<Array<{ id: string; source: string; createdAt: string; totalCount: number }>>([]);
   const [filter, setFilter] = useState({
     planType: '',
     search: '',
     tag: '',
     sourceType: '' as '' | 'local' | 'remote',
+    batchId: '',
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [allTags, setAllTags] = useState<string[]>([]);
 
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -527,11 +531,13 @@ export default function AccountPoolPage() {
     get<Channel[]>('/channels').then(setChannels);
     get<AppSettings>('/settings').then(setSettings);
     loadTags();
+    loadBatches();
   }, []);
 
   const enabledChannels = channels.filter((c) => c.enabled);
   const activeChannel = channels.find((c) => c.id === activeTab);
   const isAllTab = activeTab === 'all';
+  const isRecycleBin = activeTab === 'recycle';
   const deletedTag = activeChannel ? `deleted:${activeChannel.name}` : '';
   const quotaLoading = usageJob?.status === 'running';
 
@@ -558,6 +564,7 @@ export default function AccountPoolPage() {
   useEffect(() => { if (page === -1) setPage(0); }, [page]);
 
   const loadTags = () => get<string[]>('/tags').then(setAllTags);
+  const loadBatches = () => get<typeof batches>('/accounts/batches').then(setBatches);
 
   const buildScopeQuery = useCallback(() => {
     // 渠道 tab 下用 sync tag 筛选，同时保留用户手动选的 tag
@@ -607,7 +614,9 @@ export default function AccountPoolPage() {
     if (filter.planType) p.set('planType', filter.planType);
     if (filter.search) p.set('search', filter.search);
     if (filter.tag) p.set('tags', filter.tag);
-    if (isAllTab) { if (filter.sourceType) p.set('sourceType', filter.sourceType); }
+    if (filter.batchId) p.set('batchId', filter.batchId);
+    if (isRecycleBin) { p.set('onlyDeleted', 'true'); }
+    else if (isAllTab) { if (filter.sourceType) p.set('sourceType', filter.sourceType); }
     else if (activeChannel) { p.set('tags', `sync:${activeChannel.name}`); }
     p.set('limit', String(ps));
     p.set('offset', String(pg * ps));
@@ -617,7 +626,8 @@ export default function AccountPoolPage() {
     if (filter.planType) sp.set('planType', filter.planType);
     if (filter.search) sp.set('search', filter.search);
     if (filter.tag) sp.set('tags', filter.tag);
-    if (isAllTab) { if (filter.sourceType) sp.set('sourceType', filter.sourceType); }
+    if (isRecycleBin) { sp.set('onlyDeleted', 'true'); }
+    else if (isAllTab) { if (filter.sourceType) sp.set('sourceType', filter.sourceType); }
     else if (activeChannel) { sp.set('tags', `sync:${activeChannel.name}`); }
 
     Promise.all([
@@ -636,7 +646,7 @@ export default function AccountPoolPage() {
         return next;
       });
     }).finally(() => setLoading(false));
-  }, [activeChannel, filter.planType, filter.search, filter.sourceType, filter.tag, isAllTab]);
+  }, [activeChannel, filter.planType, filter.search, filter.sourceType, filter.tag, filter.batchId, isAllTab, isRecycleBin]);
 
   // channels 未加载完时不请求数据（避免先请求"全部"再请求渠道 tab 的重复请求）
   const channelsReady = channels.length > 0 || isAllTab;
@@ -794,6 +804,26 @@ export default function AccountPoolPage() {
     fetchAccounts(page, pageSize);
   };
 
+  const handleBatchRestore = async () => {
+    if (selected.size === 0) return;
+    const accepted = await confirm({ title: '批量恢复', description: `确认恢复 ${selected.size} 个账号？`, confirmText: '恢复' });
+    if (!accepted) return;
+    await post('/accounts/batch-restore', { ids: Array.from(selected) });
+    setSelected(new Set());
+    notify({ tone: 'success', title: '恢复完成', description: `已恢复 ${selected.size} 个账号` });
+    fetchAccounts(page, pageSize);
+  };
+
+  const handleBatchPermanentDelete = async () => {
+    if (selected.size === 0) return;
+    const accepted = await confirm({ title: '永久删除', description: `确认永久删除 ${selected.size} 个账号？此操作不可恢复。`, confirmText: '永久删除', tone: 'danger' });
+    if (!accepted) return;
+    await post('/accounts/batch-permanent-delete', { ids: Array.from(selected) });
+    setSelected(new Set());
+    notify({ tone: 'success', title: '永久删除完成', description: `已永久删除 ${selected.size} 个账号` });
+    fetchAccounts(page, pageSize);
+  };
+
   const [batchRefreshing, setBatchRefreshing] = useState(false);
   const handleBatchRefresh = async () => {
     if (selected.size === 0) return;
@@ -858,6 +888,17 @@ export default function AccountPoolPage() {
             </button>
           );
         })}
+        <div className="ml-auto">
+          <button
+            onClick={() => setActiveTab('recycle')}
+            className={cn(
+              'px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px',
+              isRecycleBin ? 'border-destructive text-destructive' : 'border-transparent text-muted-foreground hover:text-foreground',
+            )}
+          >
+            回收站
+          </button>
+        </div>
       </div>
 
       <QuotaPanel
@@ -884,6 +925,18 @@ export default function AccountPoolPage() {
               onChange={(v) => setFilter((c) => ({ ...c, tag: v }))}
               options={[{ value: '', label: '全部标签' }, ...allTags.map((t) => ({ value: t, label: t }))]}
               style={{ width: 150 }}
+            />
+            <SelectField
+              value={filter.batchId}
+              onChange={(v) => setFilter((c) => ({ ...c, batchId: v }))}
+              options={[
+                { value: '', label: '全部批次' },
+                ...batches.map((b) => ({
+                  value: b.id,
+                  label: `${b.source.slice(0, 20)} (${b.totalCount}) ${new Date(b.createdAt).toLocaleDateString()}`,
+                })),
+              ]}
+              style={{ width: 200 }}
             />
             {isAllTab && (
               <SelectField
@@ -1208,7 +1261,8 @@ export default function AccountPoolPage() {
                 const probeBadge = getProbeBadge(probe);
 
                 return (
-                  <TableRow key={account.id} className={dead ? 'opacity-55' : ''}>
+                  <React.Fragment key={account.id}>
+                  <TableRow className={dead ? 'opacity-55' : ''}>
                     <TableCell>
                       <Checkbox checked={selected.has(account.id)} onCheckedChange={() => toggleSelect(account.id)} />
                     </TableCell>
@@ -1288,10 +1342,21 @@ export default function AccountPoolPage() {
                           disabled={probingIds.has(account.id)}
                         >检测额度</Button>
                         <Button size="sm" onClick={() => openTestDialog(account.id, account.email)} disabled={testingId !== null && testingId !== account.id}>测试调用</Button>
+                        <Button size="sm" variant="ghost" onClick={() => setExpandedRow((c) => c === account.id ? null : account.id)}>
+                          {expandedRow === account.id ? '收起' : '事件'}
+                        </Button>
                         <Button size="sm" variant="destructive" onClick={() => handleDelete(account.id)}>删</Button>
                       </div>
                     </TableCell>
                   </TableRow>
+                  {expandedRow === account.id && (
+                    <TableRow>
+                      <TableCell colSpan={20} className="bg-muted/30 p-4">
+                        <EventTimeline accountId={account.id} />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  </React.Fragment>
                 );
               })}
             </TableBody>
@@ -1304,9 +1369,10 @@ export default function AccountPoolPage() {
       <BatchActionBar
         selectedCount={selected.size}
         onClearSelection={() => setSelected(new Set())}
-        onBatchDelete={handleBatchDelete}
-        onBatchRefresh={handleBatchRefresh}
+        onBatchDelete={isRecycleBin ? handleBatchPermanentDelete : handleBatchDelete}
+        onBatchRefresh={isRecycleBin ? undefined : handleBatchRefresh}
         batchRefreshing={batchRefreshing}
+        onBatchRestore={isRecycleBin ? handleBatchRestore : undefined}
       />
     </div>
   );

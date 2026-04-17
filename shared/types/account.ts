@@ -33,7 +33,9 @@ export interface Account {
   importedAt: string;
   pushHistory: PushHistoryEntry[];
   lastProbe: AccountProbeState | null;
+  batchId?: string;
   deletedAt?: string;
+  deleteReason?: string;
 }
 
 export interface PushHistoryEntry {
@@ -75,6 +77,8 @@ export interface AccountQuery {
   importDateFrom?: string;
   importDateTo?: string;
   includeDeleted?: boolean;
+  onlyDeleted?: boolean;
+  batchId?: string;
   limit?: number;
   offset?: number;
 }

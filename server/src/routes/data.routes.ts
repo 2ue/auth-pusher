@@ -13,11 +13,9 @@ import * as fileStore from '../persistence/file.store.js';
 import type { ParsedData, ParsedRecordPage, RawRecord } from '../../../shared/types/data.js';
 import { decodeOpenAiJwt } from '../utils/jwt.js';
 import * as tokenRefreshService from '../services/token-refresh.service.js';
-
-const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-
-type ExportFormat = 'raw' | 'cpa' | 'sub2api';
-type ExportMode = 'individual' | 'merged';
+import * as accountService from '../services/account.service.js';
+import { applyFieldMapping } from '../adapters/field-mapper.js';
+import { formatRecord, pickField as exportPickField, type ExportFormat, type ExportMode } from '../utils/export-formatter.js';
 
 interface ExportItemInput {
   index?: number;
@@ -43,85 +41,6 @@ function pickField(fields: Record<string, unknown>, keys: string[]): string {
     }
   }
   return '';
-}
-
-/** 原始 Token 文件格式：扁平 JSON，含 plan_type（与 dp-auth-raw profile 对齐） */
-function formatRaw(fields: Record<string, unknown>): Record<string, unknown> {
-  const email = pickField(fields, ['email', 'Email', 'extra.email']);
-  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
-  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
-  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
-  const accountId = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
-  const planType = pickField(fields, ['plan_type', 'planType', 'credentials.plan_type']);
-
-  const out: Record<string, unknown> = { email, access_token: accessToken };
-  if (refreshToken) out.refresh_token = refreshToken;
-  if (idToken) out.id_token = idToken;
-  if (accountId) out.account_id = accountId;
-  if (planType) out.plan_type = planType;
-  return out;
-}
-
-/** CPA (CliproxyCLI) 上传格式：与 cpa-upload.pusher.ts 构造的文件一致，不含 plan_type */
-function formatCpa(fields: Record<string, unknown>): Record<string, unknown> {
-  const email = pickField(fields, ['email', 'Email', 'extra.email']);
-  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
-  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
-  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
-  const sessionToken = pickField(fields, ['session_token', 'sessionToken']);
-  const accountId = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
-
-  const out: Record<string, unknown> = { email, access_token: accessToken };
-  if (refreshToken) out.refresh_token = refreshToken;
-  if (idToken) out.id_token = idToken;
-  if (sessionToken) out.session_token = sessionToken;
-  if (accountId) out.account_id = accountId;
-  return out;
-}
-
-/** SUB2API 导出格式：完整 OAuth account payload（与 Sub2ApiPusher.buildRequest 对齐） */
-function formatSub2Api(fields: Record<string, unknown>): Record<string, unknown> {
-  const email = pickField(fields, ['email', 'Email', 'extra.email']);
-  const accessToken = pickField(fields, ['access_token', 'accessToken', 'credentials.access_token']);
-  const refreshToken = pickField(fields, ['refresh_token', 'refreshToken', 'credentials.refresh_token']);
-  const idToken = pickField(fields, ['id_token', 'idToken', 'credentials.id_token']);
-  const accountIdField = pickField(fields, ['account_id', 'accountId', 'credentials.chatgpt_account_id']);
-  const organizationIdField = pickField(fields, ['organization_id', 'organizationId', 'credentials.organization_id']);
-  const planTypeField = pickField(fields, ['plan_type', 'planType', 'credentials.plan_type']);
-
-  const atClaims = decodeOpenAiJwt(accessToken);
-  const itClaims = decodeOpenAiJwt(idToken);
-
-  const chatgptAccountId = accountIdField || atClaims.accountId;
-  const chatgptUserId = atClaims.userId;
-  const organizationId = organizationIdField || itClaims.organizationId;
-  const planType = planTypeField || atClaims.planType || itClaims.planType;
-
-  const credentials: Record<string, unknown> = {
-    access_token: accessToken,
-    client_id: OAUTH_CLIENT_ID,
-  };
-  if (atClaims.exp > 0) credentials.expires_at = new Date(atClaims.exp * 1000).toISOString();
-  if (refreshToken) credentials.refresh_token = refreshToken;
-  if (idToken) credentials.id_token = idToken;
-  if (chatgptAccountId) credentials.chatgpt_account_id = chatgptAccountId;
-  if (chatgptUserId) credentials.chatgpt_user_id = chatgptUserId;
-  if (organizationId) credentials.organization_id = organizationId;
-  if (planType) credentials.plan_type = planType;
-
-  return {
-    name: email,
-    platform: 'openai',
-    type: 'oauth',
-    credentials,
-    extra: { email },
-  };
-}
-
-function formatRecord(format: ExportFormat, fields: Record<string, unknown>): Record<string, unknown> {
-  if (format === 'sub2api') return formatSub2Api(fields);
-  if (format === 'cpa') return formatCpa(fields);
-  return formatRaw(fields);
 }
 
 const uploadBaseDir = path.join(getDataDir(), 'uploads');
@@ -671,6 +590,31 @@ dataRoutes.post('/refresh-tokens', async (req, res) => {
     if (updatedCount > 0) {
       fs.writeFileSync(mergedPath, JSON.stringify(rawContent, null, 2), 'utf-8');
     }
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+// ── 文件模式数据入池 ────────────────────────────────────────
+
+dataRoutes.post('/import-to-pool', (req, res) => {
+  try {
+    const fileId = String(req.body?.fileId ?? '').trim();
+    const fieldMapping = (req.body?.fieldMapping ?? {}) as Record<string, string>;
+    const planTypeOverride = req.body?.planTypeOverride as string | undefined;
+    const tags = Array.isArray(req.body?.tags) ? req.body.tags as string[] : undefined;
+
+    if (!fileId) return res.status(400).json({ error: '缺少 fileId' });
+
+    const records = readMergedRecords(fileId);
+    if (records.length === 0) return res.status(400).json({ error: '文件中无记录' });
+
+    const result = accountService.importFromRecords(records, fieldMapping, `file:${fileId}`, {
+      planTypeOverride: planTypeOverride || undefined,
+      tags,
+    });
 
     res.json(result);
   } catch (e) {

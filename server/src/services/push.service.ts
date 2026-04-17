@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getDataDir } from '../persistence/json-store.js';
 import { sendWebhook } from './webhook.service.js';
+import * as eventStore from '../persistence/event.store.js';
 
 /** SSE 连接池 */
 const sseClients = new Map<string, Set<Response>>();
@@ -261,6 +262,14 @@ async function pushSingleItem(
         channelId: channel.id, channelName: channel.name,
         taskId: task.id, status: evaluation.ok ? 'success' : 'failed',
       });
+      // 写入推送事件
+      const acc = accountStore.findByEmail(item.identifier);
+      if (acc) {
+        eventStore.addEvent(acc.id, acc.email, 'push', {
+          channelId: channel.id, channelName: channel.name,
+          taskId: task.id, status: evaluation.ok ? 'success' : 'failed',
+        });
+      }
     }
   } catch (err) {
     taskItem.status = 'failed';

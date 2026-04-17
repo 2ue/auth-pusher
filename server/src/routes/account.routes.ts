@@ -15,6 +15,9 @@ import * as accountTestService from '../services/account-test.service.js';
 import * as accountStore from '../persistence/account.store.js';
 import * as transferService from '../services/transfer.service.js';
 import * as tokenRefreshService from '../services/token-refresh.service.js';
+import { formatRecord, accountToFields, type ExportFormat } from '../utils/export-formatter.js';
+import * as eventStore from '../persistence/event.store.js';
+import * as batchStore from '../persistence/batch.store.js';
 import { decodeOpenAiJwt } from '../utils/jwt.js';
 
 const uploadBaseDir = path.join(getDataDir(), 'uploads');
@@ -65,6 +68,9 @@ function parseQuery(req: { query: Record<string, unknown> }): AccountQuery {
     source: req.query.source as string | undefined,
     importDateFrom: req.query.importDateFrom as string | undefined,
     importDateTo: req.query.importDateTo as string | undefined,
+    includeDeleted: req.query.includeDeleted === 'true' ? true : undefined,
+    onlyDeleted: req.query.onlyDeleted === 'true' ? true : undefined,
+    batchId: req.query.batchId as string | undefined,
     limit: req.query.limit ? Number(req.query.limit) : undefined,
     offset: req.query.offset ? Number(req.query.offset) : undefined,
   };
@@ -81,6 +87,18 @@ accountRoutes.get('/', (req, res) => {
 accountRoutes.get('/stats', (req, res) => {
   const q = parseQuery(req);
   res.json(accountService.getFilteredStats(q));
+});
+
+/** 导入批次列表 */
+accountRoutes.get('/batches', (_req, res) => {
+  res.json(batchStore.findRecent(50));
+});
+
+/** 导入批次详情 */
+accountRoutes.get('/batches/:id', (req, res) => {
+  const batch = batchStore.findById(req.params.id);
+  if (!batch) return res.status(404).json({ error: '批次不存在' });
+  res.json(batch);
 });
 
 /** 过滤后的 id 列表（用于全量探测） */
@@ -249,18 +267,51 @@ accountRoutes.get('/usage-jobs/:id/events', (req, res) => {
   }
 });
 
-/** 删除单个 */
+/** 删除单个（软删除） */
 accountRoutes.delete('/:id', (req, res) => {
-  const ok = accountService.removeAccount(req.params.id);
-  if (!ok) return res.status(404).json({ error: '账号不存在' });
+  const account = accountStore.findById(req.params.id);
+  if (!account) return res.status(404).json({ error: '账号不存在' });
+  const ok = accountStore.softDelete(req.params.id, 'manual');
+  if (!ok) return res.status(400).json({ error: '账号已删除' });
+  eventStore.addEvent(account.id, account.email, 'delete', { reason: 'manual' });
   res.json({ ok: true });
 });
 
-/** 批量删除 */
+/** 批量删除（软删除） */
 accountRoutes.post('/batch-delete', (req, res) => {
   const ids = req.body?.ids as string[];
   if (!ids || ids.length === 0) return res.status(400).json({ error: '缺少 ids' });
-  const removed = accountService.removeAccounts(ids);
+  const accounts = ids.map((id) => accountStore.findById(id)).filter(Boolean);
+  const removed = accountStore.softDeleteBatch(ids, 'manual');
+  eventStore.addBatchEvents(accounts.map((a) => ({ accountId: a!.id, email: a!.email, eventType: 'delete' as const, detail: { reason: 'manual' } })));
+  res.json({ removed });
+});
+
+/** 恢复单个 */
+accountRoutes.post('/:id/restore', (req, res) => {
+  const account = accountStore.findById(req.params.id);
+  if (!account) return res.status(404).json({ error: '账号不存在' });
+  const ok = accountStore.restore(req.params.id);
+  if (!ok) return res.status(400).json({ error: '恢复失败' });
+  eventStore.addEvent(account.id, account.email, 'restore', {});
+  res.json({ ok: true });
+});
+
+/** 批量恢复 */
+accountRoutes.post('/batch-restore', (req, res) => {
+  const ids = req.body?.ids as string[];
+  if (!ids || ids.length === 0) return res.status(400).json({ error: '缺少 ids' });
+  const accounts = ids.map((id) => accountStore.findById(id)).filter(Boolean);
+  const restored = accountStore.restoreBatch(ids);
+  eventStore.addBatchEvents(accounts.map((a) => ({ accountId: a!.id, email: a!.email, eventType: 'restore' as const })));
+  res.json({ restored });
+});
+
+/** 永久删除（仅回收站中使用） */
+accountRoutes.post('/batch-permanent-delete', (req, res) => {
+  const ids = req.body?.ids as string[];
+  if (!ids || ids.length === 0) return res.status(400).json({ error: '缺少 ids' });
+  const removed = accountStore.permanentDeleteBatch(ids);
   res.json({ removed });
 });
 
@@ -322,6 +373,16 @@ accountRoutes.post('/probe', async (req, res) => {
     });
     // 探测完毕后一次性批量保存所有 probe 状态（含限流/失效等）
     accountStore.batchUpdateProbeStates(pendingUpdates);
+    // 写入探测事件
+    const probeEvents = result.results
+      .filter((r) => r.accountId)
+      .map((r) => ({
+        accountId: r.accountId!,
+        email: r.email,
+        eventType: 'probe' as const,
+        detail: { status: r.status, fiveHourUsed: r.usage?.fiveHourUsed, sevenDayUsed: r.usage?.sevenDayUsed },
+      }));
+    eventStore.addBatchEvents(probeEvents);
     res.json(result);
   } catch (e) {
     res.status(500).json({ error: (e as Error).message });
@@ -357,7 +418,7 @@ accountRoutes.get('/probe', async (_req, res) => {
   }
 });
 
-/** 导出账号为 JSON（支持筛选条件） */
+/** 导出账号（支持 format=raw/cpa/sub2api，默认 raw） */
 accountRoutes.get('/export', (req, res) => {
   try {
     const q: AccountQuery = {};
@@ -366,25 +427,19 @@ accountRoutes.get('/export', (req, res) => {
     if (req.query.tags) q.tags = String(req.query.tags).split(',');
     if (req.query.sourceType) q.sourceType = String(req.query.sourceType) as AccountSourceType;
     if (req.query.source) q.source = String(req.query.source);
+    if (req.query.batchId) q.batchId = String(req.query.batchId);
+
+    const rawFormat = String(req.query.format ?? 'raw').trim().toLowerCase();
+    const format: ExportFormat = rawFormat === 'sub2api' ? 'sub2api' : rawFormat === 'cpa' ? 'cpa' : 'raw';
 
     const ids = accountStore.queryIds(q);
     const allAccounts = accountStore.loadAll();
     const idSet = new Set(ids);
-    const exported = allAccounts.filter((a) => idSet.has(a.id)).map((a) => ({
-      email: a.email,
-      accessToken: a.accessToken,
-      refreshToken: a.refreshToken,
-      idToken: a.idToken,
-      accountId: a.accountId,
-      organizationId: a.organizationId,
-      planType: a.planType,
-      tags: a.tags,
-      sourceType: a.sourceType,
-      source: a.source,
-      expiredAt: a.expiredAt,
-    }));
+    const exported = allAccounts
+      .filter((a) => idSet.has(a.id))
+      .map((a) => formatRecord(format, accountToFields(a)));
 
-    const filename = `accounts-export-${new Date().toISOString().slice(0, 10)}.json`;
+    const filename = `accounts-export-${format}-${new Date().toISOString().slice(0, 10)}.json`;
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.json(exported);
@@ -421,6 +476,23 @@ accountRoutes.get('/:id/test', (req, res) => {
   accountTestService.testAccount(req.params.id, res, model);
 });
 
+// ── 账号事件 ──────────────────────────────────────────────
+
+/** 获取账号事件列表 */
+accountRoutes.get('/:id/events', (req, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit ?? 50)));
+  const offset = Math.max(0, Number(req.query.offset ?? 0));
+  const eventType = typeof req.query.type === 'string' ? req.query.type : undefined;
+
+  if (eventType) {
+    const events = eventStore.getByAccountIdAndType(req.params.id, eventType as Parameters<typeof eventStore.getByAccountIdAndType>[1], limit, offset);
+    res.json({ events, total: events.length });
+  } else {
+    const result = eventStore.getByAccountId(req.params.id, limit, offset);
+    res.json(result);
+  }
+});
+
 // ── Token 刷新 ──────────────────────────────────────────────
 
 /** 单个账号刷新 token */
@@ -447,6 +519,9 @@ accountRoutes.post('/:id/refresh', async (req, res) => {
         organizationId: result.organizationId,
       });
     }
+    eventStore.addEvent(account.id, account.email, 'refresh', {
+      status: result.status, newExpiredAt: result.expiredAt, errorMessage: result.errorMessage,
+    });
 
     res.json(result);
   } catch (err) {
@@ -496,6 +571,16 @@ accountRoutes.post('/batch-refresh', async (req, res) => {
     });
 
     accountStore.batchUpdateTokens(pendingUpdates);
+    // 写入刷新事件
+    const refreshEvents = result.results
+      .filter((r) => r.id)
+      .map((r) => ({
+        accountId: r.id!,
+        email: r.email,
+        eventType: 'refresh' as const,
+        detail: { status: r.status, newExpiredAt: r.expiredAt, errorMessage: r.errorMessage },
+      }));
+    eventStore.addBatchEvents(refreshEvents);
 
     res.json(result);
   } catch (err) {
