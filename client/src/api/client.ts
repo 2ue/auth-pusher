@@ -5,6 +5,12 @@ function getApiKey(): string {
   return localStorage.getItem('auth-pusher-api-key') ?? '';
 }
 
+/** 获取 API Key header（用于手动 fetch 场景） */
+export function getApiKeyHeader(): Record<string, string> {
+  const key = getApiKey();
+  return key ? { 'X-Api-Key': key } : {};
+}
+
 export function setApiKey(key: string) {
   if (key) localStorage.setItem('auth-pusher-api-key', key);
   else localStorage.removeItem('auth-pusher-api-key');

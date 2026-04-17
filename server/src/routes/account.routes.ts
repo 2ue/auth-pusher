@@ -14,13 +14,24 @@ import * as usageProbeService from '../services/usage-probe.service.js';
 import * as accountTestService from '../services/account-test.service.js';
 import * as accountStore from '../persistence/account.store.js';
 import * as transferService from '../services/transfer.service.js';
+import * as tokenRefreshService from '../services/token-refresh.service.js';
 import { decodeOpenAiJwt } from '../utils/jwt.js';
 
-const uploadDir = path.join(getDataDir(), 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const uploadBaseDir = path.join(getDataDir(), 'uploads');
+if (!fs.existsSync(uploadBaseDir)) fs.mkdirSync(uploadBaseDir, { recursive: true });
+
+function makeTimestampDir(): string {
+  const now = new Date();
+  const ts = now.toISOString().replace(/[-:T]/g, '').slice(0, 14).replace(/(\d{8})(\d{6})/, '$1-$2');
+  const dir = path.join(uploadBaseDir, ts);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 const storage = multer.diskStorage({
-  destination: uploadDir,
+  destination: (_req, _file, cb) => {
+    cb(null, makeTimestampDir());
+  },
   filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname) || '.json';
     cb(null, `${nanoid(12)}${ext}`);
@@ -408,4 +419,86 @@ accountRoutes.post('/:id/test', (req, res) => {
 accountRoutes.get('/:id/test', (req, res) => {
   const model = typeof req.query?.model === 'string' ? req.query.model : undefined;
   accountTestService.testAccount(req.params.id, res, model);
+});
+
+// ── Token 刷新 ──────────────────────────────────────────────
+
+/** 单个账号刷新 token */
+accountRoutes.post('/:id/refresh', async (req, res) => {
+  try {
+    const account = accountStore.findById(req.params.id);
+    if (!account) return res.status(404).json({ error: '账号不存在' });
+    if (!account.refreshToken) return res.status(400).json({ error: '该账号没有 refresh_token' });
+
+    const result = await tokenRefreshService.refreshToken({
+      id: account.id,
+      email: account.email,
+      refreshToken: account.refreshToken,
+    });
+
+    if (result.status === 'ok') {
+      accountStore.updateTokens(account.id, {
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        idToken: result.idToken,
+        expiredAt: result.expiredAt,
+        planType: result.planType,
+        accountId: result.accountId,
+        organizationId: result.organizationId,
+      });
+    }
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+/** 批量刷新 token */
+accountRoutes.post('/batch-refresh', async (req, res) => {
+  try {
+    const { ids } = req.body ?? {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: '请提供账号ID列表' });
+    }
+
+    const targets: tokenRefreshService.RefreshTarget[] = [];
+    for (const id of ids) {
+      const account = accountStore.findById(id);
+      if (account?.refreshToken) {
+        targets.push({ id: account.id, email: account.email, refreshToken: account.refreshToken });
+      }
+    }
+
+    if (targets.length === 0) {
+      return res.status(400).json({ error: '所选账号均无 refresh_token' });
+    }
+
+    const pendingUpdates: Array<{ id: string; tokens: accountStore.TokenUpdate }> = [];
+    const result = await tokenRefreshService.refreshBatch(targets, {
+      concurrency: 3,
+      onResult: (item) => {
+        if (item.status === 'ok' && item.id) {
+          pendingUpdates.push({
+            id: item.id,
+            tokens: {
+              accessToken: item.accessToken,
+              refreshToken: item.refreshToken,
+              idToken: item.idToken,
+              expiredAt: item.expiredAt,
+              planType: item.planType,
+              accountId: item.accountId,
+              organizationId: item.organizationId,
+            },
+          });
+        }
+      },
+    });
+
+    accountStore.batchUpdateTokens(pendingUpdates);
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });

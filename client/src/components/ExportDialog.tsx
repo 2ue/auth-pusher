@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { TextField } from './TextField';
 import { cn } from '@/lib/utils';
+import { EXPORT_PLAN_OPTIONS } from '@/utils/data-helpers';
 
 export type ExportFormat = 'raw' | 'cpa' | 'sub2api';
 export type ExportMode = 'individual' | 'merged';
@@ -25,15 +26,6 @@ interface ExportDialogProps {
   /** 来源数据本身的 plan_type（用于「跟随原数据」提示） */
   currentPlanTypeHint?: string;
 }
-
-const PLAN_OPTIONS: { value: string; label: string }[] = [
-  { value: '', label: '跟随原数据' },
-  { value: 'free', label: 'free' },
-  { value: 'plus', label: 'plus' },
-  { value: 'pro', label: 'pro' },
-  { value: 'team', label: 'team' },
-  { value: '__custom__', label: '自定义' },
-];
 
 export function ExportDialog({
   open,
@@ -132,7 +124,7 @@ export function ExportDialog({
           <div>
             <div className="text-sm font-medium mb-2">Plan Type</div>
             <div className="flex flex-wrap gap-2">
-              {PLAN_OPTIONS.map((opt) => (
+              {EXPORT_PLAN_OPTIONS.map((opt) => (
                 <button
                   key={opt.value || 'inherit'}
                   type="button"

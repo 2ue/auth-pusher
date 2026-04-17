@@ -10,6 +10,7 @@ import DashboardPage from './pages/DashboardPage';
 import AccountPoolPage from './pages/AccountPoolPage';
 import SettingsPage from './pages/SettingsPage';
 import DetectPage from './pages/DetectPage';
+import ConvertPage from './pages/ConvertPage';
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
       <Route element={<Layout />}>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/accounts" element={<AccountPoolPage />} />
+        <Route path="/convert" element={<ConvertPage />} />
         <Route path="/detect" element={<DetectPage />} />
         <Route path="/push" element={<PushPage />} />
         <Route path="/channels" element={<ChannelListPage />} />

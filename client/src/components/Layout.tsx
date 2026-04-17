@@ -9,6 +9,7 @@ import {
   Settings,
   FileText,
   Search,
+  Repeat,
   Sun,
   Moon,
 } from 'lucide-react';
@@ -18,6 +19,7 @@ import { cn } from '@/lib/utils';
 const navItems = [
   { to: '/', label: '仪表盘', icon: LayoutDashboard },
   { to: '/accounts', label: '号池管理', icon: Database },
+  { to: '/convert', label: '转换', icon: Repeat },
   { to: '/detect', label: '检测', icon: Search },
   { to: '/push', label: '推送', icon: Send },
   { to: '/channels', label: '渠道', icon: Radio },

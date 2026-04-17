@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { TASK_ITEM_STATUS_MAP } from '@/constants/task';
 
 interface TaskItem {
   index: number;
@@ -34,14 +35,6 @@ interface Task {
   completedAt?: string;
   items: TaskItem[];
 }
-
-const statusBadge: Record<string, { label: string; variant: 'success' | 'destructive' | 'warning' | 'muted' | 'info' }> = {
-  success: { label: '成功', variant: 'success' },
-  failed: { label: '失败', variant: 'destructive' },
-  skipped: { label: '跳过', variant: 'warning' },
-  pending: { label: '等待', variant: 'muted' },
-  pushing: { label: '推送中', variant: 'info' },
-};
 
 export default function TaskDetailPage() {
   const { confirm, notify } = useFeedback();
@@ -216,7 +209,7 @@ export default function TaskDetailPage() {
           </TableHeader>
           <TableBody>
             {filteredItems.slice(itemPage * itemPageSize, (itemPage + 1) * itemPageSize).map((item) => {
-              const s = statusBadge[item.status] ?? statusBadge.pending;
+              const s = TASK_ITEM_STATUS_MAP[item.status] ?? TASK_ITEM_STATUS_MAP.pending;
               return (
                 <TableRow key={item.index}>
                   <TableCell>{item.index + 1}</TableCell>

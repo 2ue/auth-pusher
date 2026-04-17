@@ -12,6 +12,7 @@ import { matchProfile } from '../persistence/profile.store.js';
 import * as fileStore from '../persistence/file.store.js';
 import type { ParsedData, ParsedRecordPage, RawRecord } from '../../../shared/types/data.js';
 import { decodeOpenAiJwt } from '../utils/jwt.js';
+import * as tokenRefreshService from '../services/token-refresh.service.js';
 
 const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
@@ -123,11 +124,28 @@ function formatRecord(format: ExportFormat, fields: Record<string, unknown>): Re
   return formatRaw(fields);
 }
 
-const uploadDir = path.join(getDataDir(), 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+const uploadBaseDir = path.join(getDataDir(), 'uploads');
+if (!fs.existsSync(uploadBaseDir)) fs.mkdirSync(uploadBaseDir, { recursive: true });
+
+/** 兼容旧 merged 文件的读取：先在 uploadBaseDir 找，再在子目录找 */
+const uploadDir = uploadBaseDir;
+
+function makeTimestampDirName(): string {
+  const now = new Date();
+  return now.toISOString().replace(/[-:T]/g, '').slice(0, 14).replace(/(\d{8})(\d{6})/, '$1-$2');
+}
+
+function makeTimestampDir(): string {
+  const dirName = makeTimestampDirName();
+  const dir = path.join(uploadBaseDir, dirName);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
 
 const storage = multer.diskStorage({
-  destination: uploadDir,
+  destination: (_req, _file, cb) => {
+    cb(null, makeTimestampDir());
+  },
   filename: (_req, file, cb) => {
     const ext = path.extname(file.originalname) || '.json';
     cb(null, `${nanoid(12)}${ext}`);
@@ -173,11 +191,17 @@ function buildParseResponse(
     );
   }
 
-  // 将合并后的数据写入单个临时文件（供后续推送使用）
-  const mergedId = `${nanoid(12)}.json`;
-  const mergedPath = path.join(uploadDir, mergedId);
+  // 将合并后的数据写入时间戳目录下的临时文件
+  const tsDirName = makeTimestampDirName();
+  const tsDir = path.join(uploadBaseDir, tsDirName);
+  if (!fs.existsSync(tsDir)) fs.mkdirSync(tsDir, { recursive: true });
+  const mergedName = `${nanoid(12)}.json`;
+  const mergedPath = path.join(tsDir, mergedName);
   const mergedContent = records.map((r) => r.fields);
   fs.writeFileSync(mergedPath, JSON.stringify(mergedContent, null, 2), 'utf-8');
+
+  // fileId = 子目录/文件名
+  const mergedId = `${tsDirName}/${mergedName}`;
 
   return {
     fileId: mergedId,
@@ -192,13 +216,18 @@ function buildParseResponse(
   };
 }
 
-function readMergedRecords(fileId: string): RawRecord[] {
-  const safeFileId = path.basename(fileId);
-  const mergedPath = path.join(uploadDir, safeFileId);
-  if (!fs.existsSync(mergedPath)) {
-    throw new Error('解析文件不存在');
-  }
+function resolveMergedPath(fileId: string): string {
+  // 新格式：相对路径如 "20260417-153000/abc123.json"
+  const candidate = path.join(uploadBaseDir, fileId);
+  if (fs.existsSync(candidate)) return candidate;
+  // 兼容旧格式：扁平文件名如 "abc123.json"
+  const legacy = path.join(uploadBaseDir, path.basename(fileId));
+  if (fs.existsSync(legacy)) return legacy;
+  throw new Error('解析文件不存在');
+}
 
+function readMergedRecords(fileId: string): RawRecord[] {
+  const mergedPath = resolveMergedPath(fileId);
   const content = fs.readFileSync(mergedPath, 'utf-8');
   const parsed = JSON.parse(content);
   if (!Array.isArray(parsed)) {
@@ -460,11 +489,11 @@ dataRoutes.post('/append/:fileId', upload.array('files', 500), (req, res) => {
     const files = req.files as Express.Multer.File[] | undefined;
     if (!files || files.length === 0) return res.status(400).json({ error: '请上传文件' });
 
-    const safeFileId = path.basename(String(req.params.fileId ?? ''));
-    const mergedPath = path.join(uploadDir, safeFileId);
-    if (!fs.existsSync(mergedPath)) return res.status(404).json({ error: '原始文件不存在，请重新上传' });
+    const rawFileId = String(req.params.fileId ?? '');
+    let mergedPath: string;
+    try { mergedPath = resolveMergedPath(rawFileId); } catch { return res.status(404).json({ error: '原始文件不存在，请重新上传' }); }
 
-    const existing = readMergedRecords(safeFileId).map((r) => r.fields);
+    const existing = readMergedRecords(rawFileId).map((r) => r.fields);
     const keys = new Set<string>();
     for (const fields of existing) {
       const key = dedupeKey(fields);
@@ -566,5 +595,85 @@ dataRoutes.post('/parse-multi', upload.array('files', 500), (req, res) => {
     res.json({ ...result, batchId, fileCount: files.length });
   } catch (e) {
     res.status(400).json({ error: (e as Error).message });
+  }
+});
+
+// ── Token 刷新（文件模式） ─────────────────────────────────
+
+dataRoutes.post('/refresh-tokens', async (req, res) => {
+  try {
+    const fileId = String(req.body?.fileId ?? '').trim();
+    const items = Array.isArray(req.body?.items) ? (req.body.items as Array<{ index: number; refreshToken: string }>) : [];
+
+    if (!fileId) return res.status(400).json({ error: '缺少 fileId' });
+    if (items.length === 0) return res.status(400).json({ error: '缺少刷新项' });
+
+    const records = readMergedRecords(fileId);
+
+    const targets: tokenRefreshService.RefreshTarget[] = items
+      .filter((item) => {
+        const idx = Number(item.index);
+        return Number.isInteger(idx) && idx >= 0 && idx < records.length && item.refreshToken;
+      })
+      .map((item) => {
+        const fields = records[item.index].fields;
+        const email = String(
+          pickField(fields, ['email', 'Email', 'user_email']) || '',
+        );
+        return { index: item.index, email, refreshToken: item.refreshToken };
+      });
+
+    if (targets.length === 0) {
+      return res.status(400).json({ error: '没有可刷新的项（均缺少 refresh_token）' });
+    }
+
+    // 逐条刷新
+    const result = await tokenRefreshService.refreshBatch(targets, {
+      concurrency: 3,
+    });
+
+    // 刷新成功的写回文件
+    const mergedPath = resolveMergedPath(fileId);
+    const rawContent = JSON.parse(fs.readFileSync(mergedPath, 'utf-8')) as Record<string, unknown>[];
+
+    let updatedCount = 0;
+    for (const r of result.results) {
+      if (r.status !== 'ok' || r.index == null) continue;
+      const idx = r.index;
+      if (idx < 0 || idx >= rawContent.length) continue;
+
+      const fields = rawContent[idx];
+      // 更新常见 token 字段
+      if (r.accessToken) {
+        if ('access_token' in fields) fields['access_token'] = r.accessToken;
+        if ('accessToken' in fields) fields['accessToken'] = r.accessToken;
+        if ('token' in fields) fields['token'] = r.accessToken;
+        // 如果以上都没有，用最通用的 key
+        if (!('access_token' in fields) && !('accessToken' in fields) && !('token' in fields)) {
+          fields['access_token'] = r.accessToken;
+        }
+      }
+      if (r.refreshToken) {
+        if ('refresh_token' in fields) fields['refresh_token'] = r.refreshToken;
+        if ('refreshToken' in fields) fields['refreshToken'] = r.refreshToken;
+        if (!('refresh_token' in fields) && !('refreshToken' in fields)) {
+          fields['refresh_token'] = r.refreshToken;
+        }
+      }
+      if (r.idToken) {
+        if ('id_token' in fields) fields['id_token'] = r.idToken;
+        if ('idToken' in fields) fields['idToken'] = r.idToken;
+      }
+
+      updatedCount++;
+    }
+
+    if (updatedCount > 0) {
+      fs.writeFileSync(mergedPath, JSON.stringify(rawContent, null, 2), 'utf-8');
+    }
+
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
   }
 });

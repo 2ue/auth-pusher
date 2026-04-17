@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { get, post, upload } from '../api/client';
+import { get, post } from '../api/client';
 import { useFeedback } from '../components/FeedbackProvider';
+import { ImportCard } from '../components/ImportCard';
 import { UsageCell } from '../components/UsageBar';
 import Pagination from '../components/Pagination';
 import { Button } from '@/components/ui/button';
@@ -11,42 +12,14 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { TextField } from '@/components/TextField';
 import { SelectField } from '@/components/SelectField';
-import { FileTrigger } from '@/components/FileTrigger';
 import { ExportDialog, type ExportOptions } from '@/components/ExportDialog';
-import { cn } from '@/lib/utils';
+import { useFileImport } from '@/hooks/useFileImport';
+import { useExport, type ExportRow } from '@/hooks/useExport';
+import { extractProbeTarget, resolvePlanTypeOverride, pickMappedValue } from '@/utils/data-helpers';
+import type { UsageSnapshot } from '../../../shared/types/account';
+import type { DetectThresholds } from '../../../shared/types/settings';
 
-interface ParsedData {
-  fileId: string;
-  totalRecords: number;
-  sampleRecords: { index: number; fields: Record<string, unknown> }[];
-  detectedFields: string[];
-  suggestedMapping: Record<string, string>;
-  fileType: string;
-  parseWarnings: string[];
-  matchedProfileId?: string;
-  matchedProfileName?: string;
-  batchId?: string;
-  fileCount?: number;
-}
-
-interface ParsedRecordPage {
-  totalRecords: number;
-  records: { index: number; fields: Record<string, unknown> }[];
-}
-
-interface DataProfileItem {
-  id: string;
-  name: string;
-  fieldMapping: Record<string, string>;
-  builtin?: boolean;
-}
-
-interface UsageSnapshot {
-  fiveHourUsed: number;
-  fiveHourResetAt: string;
-  sevenDayUsed: number;
-  sevenDayResetAt: string;
-}
+/* ── 检测独有类型 ── */
 
 interface AccountUsageResult {
   email: string;
@@ -62,13 +35,7 @@ interface BatchUsageResult {
 }
 
 type ProbeStatusFilter = '' | 'unchecked' | 'unused' | 'used' | 'rate_limited' | 'token_invalid' | 'error';
-
 type UsageCategory = 'unused' | 'used' | 'rate_limited' | 'token_invalid' | 'error' | 'unchecked';
-
-interface DetectThresholds {
-  unusedFiveHourMaxPercent: number;
-  unusedSevenDayMaxPercent: number;
-}
 
 const DEFAULT_DETECT_THRESHOLDS: DetectThresholds = {
   unusedFiveHourMaxPercent: 2,
@@ -115,118 +82,7 @@ const CATEGORY_META: Record<UsageCategory, { label: string; filename: string }> 
   unchecked: { label: '未检测', filename: 'unchecked' },
 };
 
-const PLAN_TYPE_OPTIONS = [
-  { value: '', label: '自动识别' },
-  { value: 'free', label: 'free' },
-  { value: 'plus', label: 'plus' },
-  { value: 'pro', label: 'pro' },
-  { value: 'team', label: 'team' },
-  { value: '__custom__', label: '其他' },
-];
-
 const DETECT_CONCURRENCY = 3;
-
-function getApiKeyHeader(): Record<string, string> {
-  const key = localStorage.getItem('auth-pusher-api-key') ?? '';
-  return key ? { 'X-Api-Key': key } : {};
-}
-
-function resolvePlanTypeOverride(preset: string, custom: string): string {
-  if (preset === '__custom__') return custom.trim();
-  return preset.trim();
-}
-
-function getByPath(obj: Record<string, unknown>, fieldPath: string): unknown {
-  if (!fieldPath) return undefined;
-  if (fieldPath in obj) return obj[fieldPath];
-
-  const parts = fieldPath.split('.');
-  let current: unknown = obj;
-  for (const part of parts) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
-}
-
-function pickMappedValue(
-  fields: Record<string, unknown>,
-  fieldMapping: Record<string, string>,
-  standardField: string,
-  fallbacks: string[],
-): string {
-  const mappedPath = fieldMapping[standardField];
-  const candidates = [
-    mappedPath ? getByPath(fields, mappedPath) : undefined,
-    ...fallbacks.map((key) => getByPath(fields, key)),
-  ];
-
-  for (const candidate of candidates) {
-    const text = String(candidate ?? '').trim();
-    if (text) return text;
-  }
-  return '';
-}
-
-function decodeTokenClaims(accessToken: string): { email: string; accountId: string; planType: string } {
-  const empty = { email: '', accountId: '', planType: '' };
-  if (!accessToken) return empty;
-
-  try {
-    const parts = accessToken.split('.');
-    if (parts.length < 2) return empty;
-    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
-    const payload = JSON.parse(atob(padded)) as Record<string, unknown>;
-    const auth = (payload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
-    const profile = (payload['https://api.openai.com/profile'] ?? {}) as Record<string, unknown>;
-    return {
-      email: String(profile.email ?? '').trim(),
-      accountId: String(auth.chatgpt_account_id ?? '').trim(),
-      planType: String(auth.chatgpt_plan_type ?? '').trim(),
-    };
-  } catch {
-    return empty;
-  }
-}
-
-function extractProbeTarget(
-  fields: Record<string, unknown>,
-  fieldMapping: Record<string, string>,
-  planTypeOverride?: string,
-): { email: string; accessToken: string; accountId?: string; planType?: string } {
-  const accessToken = pickMappedValue(fields, fieldMapping, 'access_token', ['access_token', 'accessToken', 'token']);
-  const claims = decodeTokenClaims(accessToken);
-  const email = pickMappedValue(fields, fieldMapping, 'email', ['email', 'Email']) || claims.email;
-  const accountId = pickMappedValue(fields, fieldMapping, 'account_id', ['account_id', 'accountId']) || claims.accountId;
-  const planType = planTypeOverride?.trim()
-    || pickMappedValue(fields, fieldMapping, 'plan_type', ['plan_type', 'planType'])
-    || claims.planType;
-
-  return {
-    email,
-    accessToken,
-    accountId: accountId || undefined,
-    planType: planType || undefined,
-  };
-}
-
-function sanitizeFilenamePart(value: string): string {
-  return value
-    .replace(/[\\/:*?"<>|]/g, '_')
-    .replace(/\s+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80);
-}
-
-function buildExportFilename(index: number, email: string, accountId: string): string {
-  const emailPart = sanitizeFilenamePart(email);
-  if (emailPart) return `${emailPart}.json`;
-  const accountPart = sanitizeFilenamePart(accountId);
-  if (accountPart) return `${accountPart}.json`;
-  return `record-${String(index + 1).padStart(4, '0')}.json`;
-}
 
 function getStatusBadge(result: AccountUsageResult | undefined, thresholds: DetectThresholds) {
   const category = categorizeResult(result, thresholds);
@@ -240,21 +96,23 @@ function getStatusBadge(result: AccountUsageResult | undefined, thresholds: Dete
 
 export default function DetectPage() {
   const { notify } = useFeedback();
+  const fileImport = useFileImport();
+  const { exporting, setExporting, sendExport } = useExport();
 
-  const [profiles, setProfiles] = useState<DataProfileItem[]>([]);
+  /* ── plan type 覆盖 ── */
+  const [importPlanTypePreset, setImportPlanTypePreset] = useState('');
+  const [importPlanTypeCustom, setImportPlanTypeCustom] = useState('');
+  const planTypeOverride = resolvePlanTypeOverride(importPlanTypePreset, importPlanTypeCustom);
+
+  /* ── 检测独有状态 ── */
   const [thresholds, setThresholds] = useState<DetectThresholds>(DEFAULT_DETECT_THRESHOLDS);
-  const [selectedProfileId, setSelectedProfileId] = useState('');
-  const [parsedData, setParsedData] = useState<ParsedData | null>(null);
-  const [records, setRecords] = useState<ParsedRecordPage['records']>([]);
-  const [uploading, setUploading] = useState(false);
-  const [loadingRecords, setLoadingRecords] = useState(false);
-  const [uploadError, setUploadError] = useState('');
-  const [fieldMapping, setFieldMapping] = useState<Record<string, string>>({});
   const [probeResults, setProbeResults] = useState<Map<number, AccountUsageResult>>(new Map());
-  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [probing, setProbing] = useState(false);
   const [activeProbeIndices, setActiveProbeIndices] = useState<Set<number>>(new Set());
   const [processedCount, setProcessedCount] = useState(0);
+
+  /* ── 表格状态 ── */
+  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [statusFilter, setStatusFilter] = useState<ProbeStatusFilter>('');
   const [search, setSearch] = useState('');
   const [planFilter, setPlanFilter] = useState('');
@@ -264,59 +122,22 @@ export default function DetectPage() {
   const [sevenDayMax, setSevenDayMax] = useState('');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(100);
-  const [exporting, setExporting] = useState(false);
+
   const [pendingExport, setPendingExport] = useState<{
     rows: DerivedRow[];
     title: string;
     slug: string;
   } | null>(null);
-  const [importPlanTypePreset, setImportPlanTypePreset] = useState('');
-  const [importPlanTypeCustom, setImportPlanTypeCustom] = useState('');
-  const planTypeOverride = resolvePlanTypeOverride(importPlanTypePreset, importPlanTypeCustom);
 
   useEffect(() => {
-    get<DataProfileItem[]>('/profiles').then(setProfiles);
     get<{ detectThresholds?: DetectThresholds }>('/settings').then((settings) => {
       if (settings.detectThresholds) setThresholds(settings.detectThresholds);
     }).catch(() => { /* 用默认值即可 */ });
   }, []);
 
-  async function loadAllRecords(fileId: string, totalRecords: number, preserveSelection = false) {
-    setLoadingRecords(true);
-    try {
-      const all: ParsedRecordPage['records'] = [];
-      const limit = 500;
-      for (let offset = 0; offset < totalRecords; offset += limit) {
-        const pageData = await get<ParsedRecordPage>(`/data/records/${fileId}?offset=${offset}&limit=${limit}`);
-        all.push(...pageData.records);
-        if (pageData.records.length < limit) break;
-      }
-      setRecords(all);
-      if (!preserveSelection) {
-        setSelectedRows(new Set(all.map((record) => record.index)));
-      } else {
-        setSelectedRows((current) => {
-          const next = new Set(current);
-          const knownIndices = new Set(records.map((r) => r.index));
-          for (const rec of all) {
-            if (!knownIndices.has(rec.index)) next.add(rec.index);
-          }
-          return next;
-        });
-      }
-    } finally {
-      setLoadingRecords(false);
-    }
-  }
-
-  async function handleFileUpload(fileList: FileList | null, mode: 'replace' | 'append' = 'replace') {
-    if (!fileList || fileList.length === 0) return;
-    setUploading(true);
-    setUploadError('');
-
+  /* ── 文件导入回调 ── */
+  async function handleFileUpload(files: FileList | null, mode: 'replace' | 'append') {
     if (mode === 'replace') {
-      setParsedData(null);
-      setRecords([]);
       setProbeResults(new Map());
       setSelectedRows(new Set());
       setProcessedCount(0);
@@ -324,71 +145,35 @@ export default function DetectPage() {
       setPage(0);
     }
 
-    try {
-      if (mode === 'append' && parsedData) {
-        const formData = new FormData();
-        for (let index = 0; index < fileList.length; index++) {
-          formData.append('files', fileList[index]);
-        }
-        const result = await upload<{
-          fileId: string;
-          totalRecords: number;
-          added: number;
-          duplicated: number;
-          detectedFields: string[];
-          parseWarnings: string[];
-        }>(`/data/append/${parsedData.fileId}`, formData);
+    const result = await fileImport.handleFileUpload(files, mode);
+    if (!result) return;
 
-        setParsedData((current) => current ? {
-          ...current,
-          totalRecords: result.totalRecords,
-          detectedFields: Array.from(new Set([...current.detectedFields, ...result.detectedFields])),
-          parseWarnings: [...current.parseWarnings, ...result.parseWarnings],
-          fileCount: (current.fileCount ?? 1) + fileList.length,
-        } : current);
-        await loadAllRecords(result.fileId, result.totalRecords, true);
-        notify({
-          tone: 'success',
-          title: '追加完成',
-          description: `新增 ${result.added} 条${result.duplicated > 0 ? `，跳过重复 ${result.duplicated} 条` : ''}`,
-        });
-        return;
-      }
-
-      const formData = new FormData();
-      let data: ParsedData;
-      if (fileList.length === 1) {
-        formData.append('file', fileList[0]);
-        data = await upload<ParsedData>('/data/parse', formData);
-      } else {
-        for (let index = 0; index < fileList.length; index++) {
-          formData.append('files', fileList[index]);
-        }
-        data = await upload<ParsedData>('/data/parse-multi', formData);
-      }
-
-      setParsedData(data);
-      setFieldMapping(data.suggestedMapping);
-      setSelectedProfileId(data.matchedProfileId ?? '');
-      await loadAllRecords(data.fileId, data.totalRecords);
-    } catch (err) {
-      setUploadError((err as Error).message);
-    } finally {
-      setUploading(false);
+    if (result.action === 'replace') {
+      setSelectedRows(new Set(fileImport.records.map((r) => r.index)));
+    } else if (result.action === 'append') {
+      setSelectedRows((current) => {
+        const next = new Set(current);
+        for (const rec of fileImport.records) next.add(rec.index);
+        return next;
+      });
+      notify({
+        tone: 'success',
+        title: '追加完成',
+        description: `新增 ${result.added} 条${result.duplicated && result.duplicated > 0 ? `，跳过重复 ${result.duplicated} 条` : ''}`,
+      });
     }
   }
 
-  function handleProfileSelect(profileId: string) {
-    setSelectedProfileId(profileId);
-    if (!profileId) return;
-    const matched = profiles.find((profile) => profile.id === profileId);
-    if (matched) {
-      setFieldMapping(matched.fieldMapping);
+  // replace 后全选（records 异步更新）
+  useEffect(() => {
+    if (fileImport.records.length > 0 && selectedRows.size === 0) {
+      setSelectedRows(new Set(fileImport.records.map((r) => r.index)));
     }
-  }
+  }, [fileImport.records]);
 
-  const derivedRows: DerivedRow[] = records.map((record) => {
-    const target = extractProbeTarget(record.fields, fieldMapping, planTypeOverride);
+  /* ── 派生行数据 ── */
+  const derivedRows: DerivedRow[] = fileImport.records.map((record) => {
+    const target = extractProbeTarget(record.fields, fileImport.fieldMapping, planTypeOverride);
     const result = probeResults.get(record.index);
     return {
       index: record.index,
@@ -437,14 +222,65 @@ export default function DetectPage() {
   const pagedRows = visibleRows.slice(page * pageSize, (page + 1) * pageSize);
   const planOptions = Array.from(new Set(derivedRows.map((row) => row.planType).filter(Boolean))).sort();
   const allVisibleSelected = visibleRows.length > 0 && visibleRows.every((row) => selectedRows.has(row.index));
-  const progressValue = parsedData?.totalRecords ? Math.round((processedCount / parsedData.totalRecords) * 100) : 0;
+  const progressValue = fileImport.parsedData?.totalRecords ? Math.round((processedCount / fileImport.parsedData.totalRecords) * 100) : 0;
 
   useEffect(() => {
     setPage(0);
   }, [statusFilter, planFilter, search, fiveHourMin, fiveHourMax, sevenDayMin, sevenDayMax]);
 
+  /* ── 刷新 Token 逻辑 ── */
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshSummary, setRefreshSummary] = useState<{ ok: number; invalid: number; error: number; skipped: number } | null>(null);
+
+  async function handleRefreshAll() {
+    if (!fileImport.parsedData || fileImport.records.length === 0) return;
+
+    setRefreshing(true);
+
+    setRefreshSummary(null);
+
+    try {
+      const items: Array<{ index: number; refreshToken: string }> = [];
+      for (const record of fileImport.records) {
+        const rt = pickMappedValue(record.fields, fileImport.fieldMapping, 'refresh_token', ['refresh_token', 'refreshToken', 'rt']);
+        if (rt) items.push({ index: record.index, refreshToken: rt });
+      }
+
+      if (items.length === 0) {
+        notify({ tone: 'error', title: '无法刷新', description: '未找到包含 refresh_token 的记录' });
+        return;
+      }
+
+      const result = await post<{
+        total: number;
+        refreshed: number;
+        results: Array<{ index?: number; email: string; status: string; errorMessage: string }>;
+      }>('/data/refresh-tokens', { fileId: fileImport.parsedData.fileId, items });
+
+      const summary = { ok: 0, invalid: 0, error: 0, skipped: fileImport.records.length - items.length };
+      for (const r of result.results) {
+        if (r.status === 'ok') summary.ok++;
+        else if (r.status === 'invalid_grant') summary.invalid++;
+        else summary.error++;
+      }
+      setRefreshSummary(summary);
+
+
+      notify({
+        tone: summary.error === 0 && summary.invalid === 0 ? 'success' : 'error',
+        title: '刷新完成',
+        description: `成功 ${summary.ok}，失效 ${summary.invalid}，错误 ${summary.error}${summary.skipped > 0 ? `，跳过(无RT) ${summary.skipped}` : ''}`,
+      });
+    } catch (err) {
+      notify({ tone: 'error', title: '刷新失败', description: (err as Error).message });
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  /* ── 检测逻辑 ── */
   async function handleDetectAll() {
-    if (!parsedData || records.length === 0) return;
+    if (!fileImport.parsedData || fileImport.records.length === 0) return;
 
     setProbing(true);
     setProbeResults(new Map());
@@ -455,6 +291,7 @@ export default function DetectPage() {
 
     try {
       let cursor = 0;
+      const records = fileImport.records;
       const takeNextRecord = () => {
         if (cursor >= records.length) return null;
         const record = records[cursor];
@@ -477,7 +314,7 @@ export default function DetectPage() {
           const record = takeNextRecord();
           if (!record) break;
 
-          const target = extractProbeTarget(record.fields, fieldMapping, planTypeOverride);
+          const target = extractProbeTarget(record.fields, fileImport.fieldMapping, planTypeOverride);
 
           if (!target.email || !target.accessToken) {
             summary.skipped += 1;
@@ -552,66 +389,9 @@ export default function DetectPage() {
     }
   }
 
-  async function sendExport(
-    rows: typeof derivedRows,
-    options: ExportOptions,
-    downloadSlug: string,
-  ) {
-    if (!parsedData || rows.length === 0) return;
-
-    const items = rows.map((row) => ({
-      index: row.index,
-      filename: buildExportFilename(row.index, row.email, row.accountId),
-      email: row.email,
-      accountId: row.accountId,
-      planType: options.planTypeOverride || row.planType || undefined,
-      planField: fieldMapping.plan_type || undefined,
-    }));
-
-    const downloadName = `${downloadSlug}-${options.format}${options.mode === 'merged' ? '-merged' : ''}-${new Date().toISOString().slice(0, 10)}`;
-
-    const response = await fetch('/api/data/export-accounts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getApiKeyHeader(),
-      },
-      body: JSON.stringify({
-        fileId: parsedData.fileId,
-        format: options.format,
-        mode: options.mode,
-        downloadName,
-        items,
-      }),
-    });
-
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-      throw new Error(payload.error ?? `HTTP ${response.status}`);
-    }
-
-    const blob = await response.blob();
-    const ext = options.mode === 'merged' ? 'json' : 'zip';
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${downloadName}.${ext}`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-
-    notify({
-      tone: 'success',
-      title: '导出完成',
-      description: options.mode === 'merged'
-        ? `已合并导出 ${items.length} 条记录为单个 JSON`
-        : `已导出 ${items.length} 个 JSON 文件`,
-    });
-  }
-
+  /* ── 导出 ── */
   function openExportDialogForSelected() {
-    if (!parsedData) return;
+    if (!fileImport.parsedData) return;
     if (selectedRows.size === 0) {
       notify({ tone: 'error', title: '无法导出', description: '请先勾选要导出的数据' });
       return;
@@ -624,11 +404,11 @@ export default function DetectPage() {
   }
 
   function openExportDialogForCategory(category: UsageCategory) {
-    if (!parsedData) return;
+    if (!fileImport.parsedData) return;
     const rows = derivedRows.filter((row) => row.category === category);
     const meta = CATEGORY_META[category];
     if (rows.length === 0) {
-      notify({ tone: 'error', title: '无法导出', description: `��前没有${meta.label}的账号` });
+      notify({ tone: 'error', title: '无法导出', description: `当前没有${meta.label}的账号` });
       return;
     }
     setPendingExport({
@@ -639,10 +419,23 @@ export default function DetectPage() {
   }
 
   async function handleExportConfirm(options: ExportOptions) {
-    if (!pendingExport) return;
+    if (!pendingExport || !fileImport.parsedData) return;
     setExporting(true);
     try {
-      await sendExport(pendingExport.rows, options, pendingExport.slug);
+      const result = await sendExport(
+        fileImport.parsedData.fileId,
+        pendingExport.rows as ExportRow[],
+        fileImport.fieldMapping,
+        options,
+        pendingExport.slug,
+      );
+      notify({
+        tone: 'success',
+        title: '导出完成',
+        description: result.mode === 'merged'
+          ? `已合并导出 ${result.count} 条记录为单个 JSON`
+          : `已导出 ${result.count} 个 JSON 文件`,
+      });
     } catch (err) {
       notify({ tone: 'error', title: '导出失败', description: (err as Error).message });
     } finally {
@@ -659,185 +452,59 @@ export default function DetectPage() {
         </p>
       </Card>
 
-      <Card className="p-5">
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
-            <h3 className="text-base font-semibold">导入数据</h3>
-            <p className="text-xs text-muted-foreground mt-1">支持 JSON、CSV、TSV，多文件会合并为一批记录</p>
-          </div>
-          {parsedData && <Badge variant="info">{parsedData.fileType.toUpperCase()}</Badge>}
-        </div>
+      <ImportCard
+        profiles={fileImport.profiles}
+        selectedProfileId={fileImport.selectedProfileId}
+        onProfileSelect={fileImport.handleProfileSelect}
+        parsedData={fileImport.parsedData}
+        uploading={fileImport.uploading}
+        loadingRecords={fileImport.loadingRecords}
+        uploadError={fileImport.uploadError}
+        recordCount={fileImport.records.length}
+        fieldMapping={fileImport.fieldMapping}
+        onFieldMappingChange={fileImport.setFieldMapping}
+        onFileUpload={handleFileUpload}
+        disabled={probing}
+        importPlanTypePreset={importPlanTypePreset}
+        importPlanTypeCustom={importPlanTypeCustom}
+        onPlanTypePresetChange={setImportPlanTypePreset}
+        onPlanTypeCustomChange={setImportPlanTypeCustom}
+        planTypeOverride={planTypeOverride}
+      />
 
-        <div className="flex flex-wrap items-end gap-3 mb-4">
-          <div className="min-w-[180px]">
-            <div className="text-xs text-muted-foreground mb-1">导入类型</div>
-            <SelectField
-              value={importPlanTypePreset}
-              onChange={setImportPlanTypePreset}
-              options={PLAN_TYPE_OPTIONS}
-            />
-          </div>
-          {importPlanTypePreset === '__custom__' && (
-            <div className="min-w-[200px]">
-              <div className="text-xs text-muted-foreground mb-1">自定义类型</div>
-              <TextField
-                value={importPlanTypeCustom}
-                onChange={(event) => setImportPlanTypeCustom(event.target.value)}
-                placeholder="输入自定义类型"
-              />
-            </div>
-          )}
-          <div className="text-xs text-muted-foreground">
-            留空按原始数据或 token 自动识别；设置后会用于检测展示和导出。
-          </div>
-        </div>
-
-        <FileTrigger
-          variant="dropzone"
-          accept=".json,.csv,.tsv"
-          multiple
-          disabled={uploading || probing}
-          onFiles={(files) => { void handleFileUpload(files, parsedData ? 'append' : 'replace'); }}
-        >
-          {uploading ? <p>解析中...</p> : parsedData ? (
-            <div>
-              <p className="text-base mb-2">拖拽或点击继续追加文件</p>
-              <p className="text-muted-foreground text-xs">
-                新记录会追加到现有列表，按 email / access_token 自动去重，已检测结果保留
-              </p>
-            </div>
-          ) : (
-            <div>
-              <p className="text-base mb-2">拖拽或点击选择文件</p>
-              <p className="text-muted-foreground text-xs">导入后不会推送，只用于检测与导出</p>
-            </div>
-          )}
-        </FileTrigger>
-
-        {parsedData && (
-          <div className="mt-3 flex justify-end">
-            <FileTrigger
-              accept=".json,.csv,.tsv"
-              multiple
-              disabled={uploading || probing}
-              onFiles={(files) => { void handleFileUpload(files, 'replace'); }}
-            >
-              <Button size="sm" variant="ghost" disabled={uploading || probing}>
-                清空并重新导入
-              </Button>
-            </FileTrigger>
-          </div>
-        )}
-
-        {uploadError && <p className="text-destructive mt-3">{uploadError}</p>}
-
-        {parsedData && (
-          <div className="mt-4 space-y-4">
-            <div className={cn(
-              'p-3 rounded-lg border',
-              parsedData.matchedProfileId ? 'bg-success/10 border-success/30' : 'bg-muted border-border',
-            )}>
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-sm">
-                  {parsedData.matchedProfileId
-                    ? <><span className="text-success font-semibold">匹配模板:</span> {parsedData.matchedProfileName}</>
-                    : <span className="text-muted-foreground">未匹配到模板</span>}
-                </div>
-                <SelectField
-                  value={selectedProfileId}
-                  onChange={handleProfileSelect}
-                  options={[{ value: '', label: '不使用模板' }, ...profiles.map((profile) => ({ value: profile.id, label: profile.name }))]}
-                  style={{ width: 220 }}
-                />
-              </div>
-            </div>
-
-            {parsedData.parseWarnings.length > 0 && (
-              <details>
-                <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-                  解析信息（{parsedData.parseWarnings.length} 条）
-                </summary>
-                <div className="mt-2 p-2 bg-muted rounded text-xs text-muted-foreground max-h-[140px] overflow-auto">
-                  {parsedData.parseWarnings.map((warning, index) => <div key={index}>{warning}</div>)}
-                </div>
-              </details>
-            )}
-
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-xs text-muted-foreground mb-1">总记录</div>
-                <div className="text-lg font-semibold">{parsedData.totalRecords}</div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-xs text-muted-foreground mb-1">文件数</div>
-                <div className="text-lg font-semibold">{parsedData.fileCount ?? 1}</div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-xs text-muted-foreground mb-1">加载状态</div>
-                <div className="text-lg font-semibold">{loadingRecords ? '读取中...' : `${records.length} 条已载入`}</div>
-              </div>
-              <div className="rounded-lg border border-border p-3">
-                <div className="text-xs text-muted-foreground mb-1">导入类型</div>
-                <div className="text-lg font-semibold">{planTypeOverride || '自动识别'}</div>
-              </div>
-            </div>
-          </div>
-        )}
-      </Card>
-
-      {parsedData && (
+      {fileImport.parsedData && (
         <Card className="p-5">
           <div className="flex items-center justify-between gap-3 mb-4">
             <div>
-              <h3 className="text-base font-semibold">开始检测</h3>
+              <h3 className="text-base font-semibold">操作</h3>
               <p className="text-xs text-muted-foreground mt-1">
-                当前字段映射：
-                {['access_token', 'email', 'account_id', 'plan_type']
-                  .map((f) => `${f} → ${fieldMapping[f] || '未映射'}`)
-                  .join('；')}
+                刷新 Token 和检测额度是独立操作，可先刷新再检测
               </p>
             </div>
-            <Button size="sm" variant="primary" onClick={() => { void handleDetectAll(); }} loading={probing} disabled={loadingRecords || records.length === 0}>
-              {probing ? '检测中...' : '开始检测'}
-            </Button>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={() => { void handleRefreshAll(); }} loading={refreshing} disabled={probing || fileImport.loadingRecords || fileImport.records.length === 0}>
+                {refreshing ? '刷新中...' : '刷新 Token'}
+              </Button>
+              <Button size="sm" variant="primary" onClick={() => { void handleDetectAll(); }} loading={probing} disabled={refreshing || fileImport.loadingRecords || fileImport.records.length === 0}>
+                {probing ? '检测中...' : '检测额度'}
+              </Button>
+            </div>
           </div>
 
-          <details className="rounded-lg border border-border">
-            <summary className="cursor-pointer select-none px-3 py-2 text-sm text-muted-foreground hover:text-foreground">
-              调整字段映射
-            </summary>
-            <div className="px-3 pb-3">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>标准字段</TableHead>
-                    <TableHead>数据源字段</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {['access_token', 'email', 'account_id', 'plan_type'].map((field) => (
-                    <TableRow key={field}>
-                      <TableCell className="font-medium">{field}</TableCell>
-                      <TableCell>
-                        <SelectField
-                          value={fieldMapping[field] ?? ''}
-                          onChange={(value) => setFieldMapping((current) => ({ ...current, [field]: value }))}
-                          options={[{ value: '', label: '-- 不映射 --' }, ...parsedData.detectedFields.map((item) => ({ value: item, label: item }))]}
-                          className="w-full"
-                        />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+          {refreshSummary && (
+            <div className="mb-3 p-3 rounded-lg bg-muted text-sm">
+              刷新结果：成功 <span className="text-success font-semibold">{refreshSummary.ok}</span>
+              {refreshSummary.invalid > 0 && <>，RT 失效 <span className="text-destructive font-semibold">{refreshSummary.invalid}</span></>}
+              {refreshSummary.error > 0 && <>，错误 <span className="text-destructive font-semibold">{refreshSummary.error}</span></>}
+              {refreshSummary.skipped > 0 && <>，跳过 <span className="text-muted-foreground">{refreshSummary.skipped}</span></>}
             </div>
-          </details>
+          )}
 
           {(probing || processedCount > 0) && (
             <div className="mt-4 space-y-2">
               <div className="flex items-center justify-between text-xs text-muted-foreground">
                 <span>{probing ? '逐条检测中...' : '检测完成'}</span>
-                <span>{processedCount} / {parsedData.totalRecords}</span>
+                <span>{processedCount} / {fileImport.parsedData.totalRecords}</span>
               </div>
               <Progress value={progressValue} />
             </div>
@@ -845,7 +512,7 @@ export default function DetectPage() {
         </Card>
       )}
 
-      {parsedData && processedCount > 0 && (
+      {fileImport.parsedData && processedCount > 0 && (
         <Card className="p-5">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div>
@@ -881,7 +548,7 @@ export default function DetectPage() {
         </Card>
       )}
 
-      {parsedData && (
+      {fileImport.parsedData && (
         <Card className="p-5">
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <TextField

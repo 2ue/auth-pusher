@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { get, getWithTotal, post, del, upload } from '../api/client';
+import { get, getWithTotal, post, del, upload, getApiKeyHeader } from '../api/client';
 import { useFeedback } from '../components/FeedbackProvider';
 import { useSSE } from '../hooks/useSSE';
 import { UsageCell } from '../components/UsageBar';
@@ -21,11 +21,6 @@ import { buildOpenAiModelOptions } from '@/constants/openaiModels';
 import type { QuotaResult } from '../utils/calcQuota';
 
 /* ---------- SSE 辅助：解析 fetch streaming 响应中的 SSE 事件 ---------- */
-function getApiKeyHeader(): Record<string, string> {
-  const key = localStorage.getItem('auth-pusher-api-key') ?? '';
-  return key ? { 'X-Api-Key': key } : {};
-}
-
 async function readSSEStream(
   response: globalThis.Response,
   onEvent: (data: Record<string, unknown>) => void,
@@ -799,6 +794,28 @@ export default function AccountPoolPage() {
     fetchAccounts(page, pageSize);
   };
 
+  const [batchRefreshing, setBatchRefreshing] = useState(false);
+  const handleBatchRefresh = async () => {
+    if (selected.size === 0) return;
+    const accepted = await confirm({ title: '批量刷新 Token', description: `将刷新 ${selected.size} 个账号的 access_token（需要 refresh_token）。`, confirmText: '开始刷新' });
+    if (!accepted) return;
+    setBatchRefreshing(true);
+    try {
+      const result = await post<{ total: number; refreshed: number; results: Array<{ email: string; status: string; errorMessage: string }> }>('/accounts/batch-refresh', { ids: Array.from(selected) });
+      const failed = result.total - result.refreshed;
+      notify({
+        tone: failed === 0 ? 'success' : 'error',
+        title: '刷新完成',
+        description: `成功 ${result.refreshed}，失败 ${failed}，共 ${result.total}`,
+      });
+      fetchAccounts(page, pageSize);
+    } catch (err) {
+      notify({ tone: 'error', title: '刷新失败', description: (err as Error).message });
+    } finally {
+      setBatchRefreshing(false);
+    }
+  };
+
   const toggleSelect = (id: string) => {
     setSelected((c) => { const n = new Set(c); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   };
@@ -1288,6 +1305,8 @@ export default function AccountPoolPage() {
         selectedCount={selected.size}
         onClearSelection={() => setSelected(new Set())}
         onBatchDelete={handleBatchDelete}
+        onBatchRefresh={handleBatchRefresh}
+        batchRefreshing={batchRefreshing}
       />
     </div>
   );

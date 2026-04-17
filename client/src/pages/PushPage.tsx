@@ -14,6 +14,7 @@ import { TextField } from '@/components/TextField';
 import { SelectField } from '@/components/SelectField';
 import { FileTrigger } from '@/components/FileTrigger';
 import { cn } from '@/lib/utils';
+import { extractProbeTarget } from '@/utils/data-helpers';
 
 interface Channel {
   id: string; name: string; pusherType: string; enabled: boolean;
@@ -61,79 +62,6 @@ interface BatchUsageResult {
 }
 
 const STEPS = ['选择渠道', '选择数据', '字段映射', '推送执行'];
-
-function getByPath(obj: Record<string, unknown>, path: string): unknown {
-  if (!path) return undefined;
-  if (path in obj) return obj[path];
-
-  const parts = path.split('.');
-  let current: unknown = obj;
-  for (const part of parts) {
-    if (current == null || typeof current !== 'object') return undefined;
-    current = (current as Record<string, unknown>)[part];
-  }
-  return current;
-}
-
-function pickMappedValue(
-  fields: Record<string, unknown>,
-  mapping: Record<string, string>,
-  standardField: string,
-  fallbacks: string[],
-): string {
-  const mappedPath = mapping[standardField];
-  const candidates = [
-    mappedPath ? getByPath(fields, mappedPath) : undefined,
-    ...fallbacks.map((key) => getByPath(fields, key)),
-  ];
-
-  for (const value of candidates) {
-    const text = String(value ?? '').trim();
-    if (text) return text;
-  }
-  return '';
-}
-
-function decodeTokenClaims(accessToken: string): { email: string; accountId: string; planType: string } {
-  const empty = { email: '', accountId: '', planType: '' };
-  if (!accessToken) return empty;
-
-  try {
-    const parts = accessToken.split('.');
-    if (parts.length < 2) return empty;
-    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
-    const payload = JSON.parse(atob(padded)) as Record<string, unknown>;
-    const auth = (payload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
-    const profile = (payload['https://api.openai.com/profile'] ?? {}) as Record<string, unknown>;
-
-    return {
-      email: String(profile.email ?? '').trim(),
-      accountId: String(auth.chatgpt_account_id ?? '').trim(),
-      planType: String(auth.chatgpt_plan_type ?? '').trim(),
-    };
-  } catch {
-    return empty;
-  }
-}
-
-function extractProbeTarget(
-  fields: Record<string, unknown>,
-  mapping: Record<string, string>,
-): { email: string; accessToken: string; accountId?: string; planType?: string } {
-  const accessToken = pickMappedValue(fields, mapping, 'access_token', ['access_token', 'accessToken', 'token']);
-  const claims = decodeTokenClaims(accessToken);
-  const email = pickMappedValue(fields, mapping, 'email', ['email', 'Email']) || claims.email;
-  const accountId = pickMappedValue(fields, mapping, 'account_id', ['account_id', 'accountId']) || claims.accountId;
-  const planType = pickMappedValue(fields, mapping, 'plan_type', ['plan_type', 'planType']) || claims.planType;
-
-  return {
-    email,
-    accessToken,
-    accountId: accountId || undefined,
-    planType: planType || undefined,
-  };
-}
 
 export default function PushPage() {
   const { notify } = useFeedback();
@@ -280,7 +208,7 @@ export default function PushPage() {
     setFilePageLoading(true);
     try {
       const offset = page * pageSize;
-      const result = await get<ParsedRecordPage>(`/data/records/${fileId}?offset=${offset}&limit=${pageSize}`);
+      const result = await get<ParsedRecordPage>(`/data/records/${encodeURIComponent(fileId)}?offset=${offset}&limit=${pageSize}`);
       setFileRecords(result.records);
     } catch (err) {
       setUploadError((err as Error).message);
@@ -605,7 +533,7 @@ export default function PushPage() {
                             setProbing(true);
                             setProbeMap(new Map());
                             for (let offset = 0; offset < parsedData.totalRecords; offset += pageLimit) {
-                              const page = await get<ParsedRecordPage>(`/data/records/${parsedData.fileId}?offset=${offset}&limit=${pageLimit}`);
+                              const page = await get<ParsedRecordPage>(`/data/records/${encodeURIComponent(parsedData.fileId)}?offset=${offset}&limit=${pageLimit}`);
                               for (const record of page.records) {
                                 const target = extractProbeTarget(record.fields, fieldMapping);
                                 if (!target.email || !target.accessToken) {

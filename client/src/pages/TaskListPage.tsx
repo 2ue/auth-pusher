@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { TASK_STATUS_MAP } from '@/constants/task';
 
 interface TaskSummary {
   id: string;
@@ -18,14 +19,6 @@ interface TaskSummary {
   createdAt: string;
   completedAt?: string;
 }
-
-const statusMap: Record<string, { label: string; variant: 'muted' | 'info' | 'success' | 'destructive' }> = {
-  pending: { label: '等待中', variant: 'muted' },
-  running: { label: '执行中', variant: 'info' },
-  completed: { label: '已完成', variant: 'success' },
-  failed: { label: '失败', variant: 'destructive' },
-  cancelled: { label: '已取消', variant: 'muted' },
-};
 
 export default function TaskListPage() {
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
@@ -62,7 +55,7 @@ export default function TaskListPage() {
             </TableHeader>
             <TableBody>
               {tasks.slice(page * pageSize, (page + 1) * pageSize).map((task) => {
-                const s = statusMap[task.status] ?? statusMap.pending;
+                const s = TASK_STATUS_MAP[task.status] ?? TASK_STATUS_MAP.pending;
                 return (
                   <TableRow key={task.id}>
                     <TableCell>{task.channelName}</TableCell>

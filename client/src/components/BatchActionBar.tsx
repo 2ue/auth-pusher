@@ -1,7 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Card } from '@/components/ui/card';
-import { Trash2, Tag, Ban, CheckCircle } from 'lucide-react';
+import { Trash2, Tag, Ban, CheckCircle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface BatchActionBarProps {
@@ -11,6 +10,8 @@ interface BatchActionBarProps {
   onBatchDisable?: () => void;
   onBatchEnable?: () => void;
   onBatchDelete?: () => void;
+  onBatchRefresh?: () => void;
+  batchRefreshing?: boolean;
   className?: string;
 }
 
@@ -21,6 +22,8 @@ export function BatchActionBar({
   onBatchDisable,
   onBatchEnable,
   onBatchDelete,
+  onBatchRefresh,
+  batchRefreshing,
   className,
 }: BatchActionBarProps) {
   if (selectedCount === 0) return null;
@@ -74,6 +77,19 @@ export function BatchActionBar({
         >
           <CheckCircle className="h-3.5 w-3.5" />
           批量启用
+        </Button>
+      )}
+
+      {onBatchRefresh && (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onBatchRefresh}
+          loading={batchRefreshing}
+          className="gap-2"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          刷新 Token
         </Button>
       )}
 

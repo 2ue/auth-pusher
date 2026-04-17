@@ -418,6 +418,62 @@ function inferSourceType(source: string | undefined): Account['sourceType'] {
   return String(source ?? '').startsWith('sync:') ? 'remote' : 'local';
 }
 
+// ── Token 更新 ────────────────────────────────────────────────
+
+export interface TokenUpdate {
+  accessToken?: string;
+  refreshToken?: string;
+  idToken?: string;
+  expiredAt?: string;
+  planType?: string;
+  accountId?: string;
+  organizationId?: string;
+}
+
+const stmtUpdateTokens = db.prepare<[string, string, string, string, string, string, string, string]>(
+  `UPDATE accounts SET
+     accessToken = CASE WHEN ? != '' THEN ? ELSE accessToken END,
+     refreshToken = CASE WHEN ? != '' THEN ? ELSE refreshToken END,
+     idToken = CASE WHEN ? != '' THEN ? ELSE idToken END,
+     expiredAt = CASE WHEN ? != '' THEN ? ELSE expiredAt END,
+     planType = CASE WHEN ? != '' THEN ? ELSE planType END,
+     accountId = CASE WHEN ? != '' THEN ? ELSE accountId END,
+     organizationId = CASE WHEN ? != '' THEN ? ELSE organizationId END
+   WHERE id = ?`,
+);
+
+export function updateTokens(id: string, update: TokenUpdate): Account | undefined {
+  const at = update.accessToken ?? '';
+  const rt = update.refreshToken ?? '';
+  const it = update.idToken ?? '';
+  const exp = update.expiredAt ?? '';
+  const plan = update.planType ?? '';
+  const accId = update.accountId ?? '';
+  const orgId = update.organizationId ?? '';
+  stmtUpdateTokens.run(at, at, rt, rt, it, it, exp, exp, plan, plan, accId, accId, orgId, orgId, id);
+  return findById(id);
+}
+
+export function batchUpdateTokens(updates: Array<{ id: string; tokens: TokenUpdate }>): number {
+  if (updates.length === 0) return 0;
+  let count = 0;
+  const doUpdate = db.transaction(() => {
+    for (const { id, tokens } of updates) {
+      const at = tokens.accessToken ?? '';
+      const rt = tokens.refreshToken ?? '';
+      const it = tokens.idToken ?? '';
+      const exp = tokens.expiredAt ?? '';
+      const plan = tokens.planType ?? '';
+      const accId = tokens.accountId ?? '';
+      const orgId = tokens.organizationId ?? '';
+      const result = stmtUpdateTokens.run(at, at, rt, rt, it, it, exp, exp, plan, plan, accId, accId, orgId, orgId, id);
+      if (result.changes > 0) count++;
+    }
+  });
+  doUpdate();
+  return count;
+}
+
 /** 记录推送结果到账号的 pushHistory */
 export function recordPushResult(
   email: string,
