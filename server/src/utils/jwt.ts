@@ -7,28 +7,41 @@ export interface JwtAuthClaims {
   exp: number;
 }
 
+export function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  if (!token) return null;
+
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    let payload = parts[1];
+    payload += '='.repeat((4 - payload.length % 4) % 4);
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 /** 解码 JWT payload（不验证签名），提取 OpenAI auth 相关字段 */
 export function decodeOpenAiJwt(token: string): JwtAuthClaims {
   const empty: JwtAuthClaims = { email: '', planType: '', accountId: '', userId: '', organizationId: '', exp: 0 };
   if (!token) return empty;
 
   try {
-    const parts = token.split('.');
-    if (parts.length < 2) return empty;
-    let payload = parts[1];
-    payload += '='.repeat((4 - payload.length % 4) % 4);
-    const json = Buffer.from(payload, 'base64url').toString('utf-8');
-    const claims = JSON.parse(json) as Record<string, unknown>;
+    const claims = decodeJwtPayload(token);
+    if (!claims) return empty;
 
     const auth = (claims['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
     const profile = (claims['https://api.openai.com/profile'] ?? {}) as Record<string, unknown>;
+    const organizations = Array.isArray(auth.organizations) ? auth.organizations : [];
+    const defaultOrg = organizations.find((org) => (org as Record<string, unknown>)?.is_default === true) as Record<string, unknown> | undefined;
+    const fallbackOrg = defaultOrg ?? (organizations[0] as Record<string, unknown> | undefined);
 
     return {
-      email: String(profile.email ?? ''),
+      email: String(profile.email ?? claims.email ?? ''),
       planType: String(auth.chatgpt_plan_type ?? ''),
       accountId: String(auth.chatgpt_account_id ?? ''),
       userId: String(auth.chatgpt_user_id ?? ''),
-      organizationId: String(auth.organization_id ?? ''),
+      organizationId: String(auth.organization_id ?? auth.poid ?? fallbackOrg?.id ?? ''),
       exp: Number(claims.exp ?? 0),
     };
   } catch {
@@ -40,11 +53,8 @@ export function decodeOpenAiJwt(token: string): JwtAuthClaims {
 export function decodeIdTokenPlanType(idToken: string): string {
   if (!idToken) return '';
   try {
-    const parts = idToken.split('.');
-    if (parts.length < 2) return '';
-    let payload = parts[1];
-    payload += '='.repeat((4 - payload.length % 4) % 4);
-    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Record<string, unknown>;
+    const claims = decodeJwtPayload(idToken);
+    if (!claims) return '';
     const auth = (claims['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
     return String(auth.chatgpt_plan_type ?? '');
   } catch {
@@ -73,20 +83,25 @@ export function resolvePlanTypeFromTokens(accessToken: string, idToken: string):
 export function decodeIdTokenOrg(idToken: string): string {
   if (!idToken) return '';
   try {
-    const parts = idToken.split('.');
-    if (parts.length < 2) return '';
-    let payload = parts[1];
-    payload += '='.repeat((4 - payload.length % 4) % 4);
-    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as Record<string, unknown>;
+    const claims = decodeJwtPayload(idToken);
+    if (!claims) return '';
     const auth = (claims['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
 
     let orgId = String(auth.organization_id ?? '');
     if (!orgId) {
       const orgs = Array.isArray(auth.organizations) ? auth.organizations : [];
-      if (orgs.length > 0) orgId = String((orgs[0] as Record<string, unknown>)?.id ?? '');
+      const defaultOrg = orgs.find((org) => (org as Record<string, unknown>)?.is_default === true) as Record<string, unknown> | undefined;
+      const fallbackOrg = defaultOrg ?? (orgs[0] as Record<string, unknown> | undefined);
+      orgId = String(fallbackOrg?.id ?? auth.poid ?? '');
     }
     return orgId;
   } catch {
     return '';
   }
+}
+
+export function decodeIdTokenEmail(idToken: string): string {
+  const claims = decodeJwtPayload(idToken);
+  if (!claims) return '';
+  return String(claims.email ?? '');
 }

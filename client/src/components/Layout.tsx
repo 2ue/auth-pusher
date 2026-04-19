@@ -10,6 +10,7 @@ import {
   FileText,
   Search,
   Repeat,
+  Key,
   Sun,
   Moon,
 } from 'lucide-react';
@@ -19,6 +20,7 @@ import { cn } from '@/lib/utils';
 const navItems = [
   { to: '/', label: '仪表盘', icon: LayoutDashboard },
   { to: '/accounts', label: '号池管理', icon: Database },
+  { to: '/oauth-capture', label: 'OAuth采集', icon: Key },
   { to: '/convert', label: '转换', icon: Repeat },
   { to: '/detect', label: '检测', icon: Search },
   { to: '/push', label: '推送', icon: Send },

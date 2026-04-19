@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { nanoid } from 'nanoid';
-import { BasePusher, type RemoteAccountFull } from '../core/base-pusher.js';
+import { BasePusher, type RemoteAccountFull, type RemoteAccountUpdateInput } from '../core/base-pusher.js';
 import type { PusherSchema, PushRequest } from '../../../shared/types/pusher.js';
 import type { MappedDataItem } from '../../../shared/types/data.js';
 import type { Account } from '../../../shared/types/account.js';
@@ -8,6 +8,7 @@ import { resolvePlanTypeFromTokens } from '../utils/jwt.js';
 
 const API_PATH = '/api/v1/admin/accounts';
 const GROUPS_PATH = '/api/v1/admin/groups';
+const BULK_UPDATE_PATH = '/api/v1/admin/accounts/bulk-update';
 const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 
 /** 解码 JWT payload（不验证签名） */
@@ -268,6 +269,7 @@ export class Sub2ApiPusher extends BasePusher {
   // ======== 删除能力 ========
 
   override canDelete(): boolean { return true; }
+  override canUpdateRemote(): boolean { return true; }
 
   override async deleteAccount(config: Record<string, unknown>, remoteId: string): Promise<{ ok: boolean; error?: string }> {
     const conn = extractConn(config);
@@ -277,6 +279,79 @@ export class Sub2ApiPusher extends BasePusher {
       const { status, data } = await axios.delete<Record<string, unknown>>(url, { headers, timeout: 15000, validateStatus: () => true });
       if (status >= 200 && status < 300) return { ok: true };
       return { ok: false, error: String((data as Record<string, unknown>)?.error ?? (data as Record<string, unknown>)?.message ?? `HTTP ${status}`) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  override async updateRemoteAccount(
+    config: Record<string, unknown>,
+    remoteId: string,
+    input: RemoteAccountUpdateInput,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const accountId = Number.parseInt(remoteId, 10);
+    if (!Number.isFinite(accountId) || accountId <= 0) {
+      return { ok: false, error: `无效的远端账号 ID: ${remoteId}` };
+    }
+
+    const conn = extractConn(config);
+    const headers = {
+      ...buildHeaders(conn),
+      'Content-Type': 'application/json',
+    };
+
+    const credentials = buildOpenAiOauthCredentials({
+      email: input.email,
+      accessToken: input.accessToken,
+      refreshToken: input.refreshToken,
+      idToken: input.idToken,
+      accountId: input.accountId,
+      organizationId: input.organizationId,
+      planType: input.planType,
+      clientId: input.clientId,
+      userId: input.userId,
+      expiredAt: input.expiredAt,
+      modelMapping: undefined,
+    });
+
+    const body = {
+      account_ids: [accountId],
+      name: input.email,
+      extra: { email: input.email },
+      credentials,
+    };
+
+    try {
+      const url = `${conn.baseUrl}${BULK_UPDATE_PATH}`;
+      const { status, data } = await axios.post<Record<string, unknown>>(url, body, {
+        headers,
+        timeout: 20000,
+        validateStatus: () => true,
+      });
+
+      if (status < 200 || status >= 300) {
+        return {
+          ok: false,
+          error: String((data as Record<string, unknown>)?.error ?? (data as Record<string, unknown>)?.message ?? `HTTP ${status}`),
+        };
+      }
+
+      const payload = ((data as Record<string, unknown>)?.data ?? data) as Record<string, unknown>;
+      const success = Number(payload.success ?? 0);
+      const failed = Number(payload.failed ?? 0);
+      if (success > 0 && failed === 0) return { ok: true };
+      if ((data as Record<string, unknown>)?.code === 0 || (data as Record<string, unknown>)?.code === 200) return { ok: true };
+
+      const results = Array.isArray(payload.results) ? payload.results : [];
+      const firstFailure = results.find((item) => {
+        if (!item || typeof item !== 'object') return false;
+        return (item as Record<string, unknown>).success === false;
+      }) as Record<string, unknown> | undefined;
+
+      return {
+        ok: false,
+        error: String(firstFailure?.error ?? (data as Record<string, unknown>)?.error ?? (data as Record<string, unknown>)?.message ?? '远端更新失败'),
+      };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -396,4 +471,81 @@ function parseGroupIds(value: unknown): number[] {
   if (!value) return [];
   const str = String(value);
   return str.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+}
+
+function buildOpenAiOauthCredentials(input: {
+  email?: string;
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  accountId?: string;
+  organizationId?: string;
+  planType?: string;
+  clientId?: string;
+  userId?: string;
+  expiredAt?: string;
+  modelMapping?: unknown;
+}): Record<string, unknown> {
+  const accessToken = String(input.accessToken ?? '');
+  const refreshToken = String(input.refreshToken ?? '');
+  const idToken = String(input.idToken ?? '');
+
+  const atPayload = decodeJwtPayload(accessToken);
+  const atAuth = (atPayload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
+  const itPayload = decodeJwtPayload(idToken);
+  const itAuth = (itPayload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
+
+  const accountId = String(
+    input.accountId
+    ?? atAuth.chatgpt_account_id
+    ?? '',
+  );
+  const userId = String(
+    input.userId
+    ?? atAuth.chatgpt_user_id
+    ?? '',
+  );
+
+  let organizationId = String(
+    input.organizationId
+    ?? itAuth.organization_id
+    ?? '',
+  );
+  if (!organizationId) {
+    const orgs = Array.isArray(itAuth.organizations) ? itAuth.organizations : [];
+    if (orgs.length > 0) {
+      organizationId = String((orgs[0] as Record<string, unknown>)?.id ?? '');
+    }
+  }
+
+  const expTimestamp = Number(atPayload.exp ?? 0);
+  const credentials: Record<string, unknown> = {
+    access_token: accessToken,
+  };
+
+  const expiresAt = String(input.expiredAt ?? '').trim();
+  if (expiresAt) credentials.expires_at = expiresAt;
+  else if (expTimestamp > 0) credentials.expires_at = new Date(expTimestamp * 1000).toISOString();
+
+  if (refreshToken) credentials.refresh_token = refreshToken;
+  if (idToken) credentials.id_token = idToken;
+  if (String(input.email ?? '').trim()) credentials.email = String(input.email).trim();
+  credentials.client_id = String(input.clientId ?? atPayload.client_id ?? OAUTH_CLIENT_ID).trim() || OAUTH_CLIENT_ID;
+  if (accountId) credentials.chatgpt_account_id = accountId;
+  if (userId) credentials.chatgpt_user_id = userId;
+  if (organizationId) credentials.organization_id = organizationId;
+
+  const planType = String(
+    input.planType
+    ?? atAuth.chatgpt_plan_type
+    ?? itAuth.chatgpt_plan_type
+    ?? '',
+  );
+  if (planType) credentials.plan_type = planType;
+
+  if (input.modelMapping && typeof input.modelMapping === 'object' && Object.keys(input.modelMapping as object).length > 0) {
+    credentials.model_mapping = input.modelMapping;
+  }
+
+  return credentials;
 }

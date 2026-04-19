@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { type Express } from 'express';
 import cors from 'cors';
 import { apiKeyAuth } from './middleware/auth.js';
 import { errorHandler } from './middleware/error-handler.js';
@@ -12,10 +12,20 @@ import { settingsRoutes } from './routes/settings.routes.js';
 import { tagRoutes } from './routes/tag.routes.js';
 import { fileRoutes } from './routes/file.routes.js';
 import { schedulerRoutes } from './routes/scheduler.routes.js';
+import {
+  handleOpenAiAuthCallback,
+  handleOpenAiAuthIndex,
+  handleOpenAiAuthSuccess,
+  handleOpenAiAuthUrl,
+  openaiAuthRoutes,
+} from './routes/openai-auth.routes.js';
 import { initScheduler } from './services/scheduler.service.js';
+import { hydrateAccountChannelLinks } from './services/account-channel-link.service.js';
 
-export function createApp() {
+export function createApp(): Express {
   const app = express();
+
+  hydrateAccountChannelLinks();
 
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
@@ -25,9 +35,20 @@ export function createApp() {
     res.json({ ok: true });
   });
 
+  app.get('/', handleOpenAiAuthIndex);
+  app.get('/api/auth-url', handleOpenAiAuthUrl);
+  app.get('/success', handleOpenAiAuthSuccess);
+  app.get('/auth/callback', (req, res) => {
+    void handleOpenAiAuthCallback(req, res);
+  });
+  app.get('/api/openai-auth/callback', (req, res) => {
+    void handleOpenAiAuthCallback(req, res);
+  });
+
   // API Key 鉴权（apiKey 为空时不启用，向下兼容）
   app.use('/api', apiKeyAuth);
 
+  app.use('/api/openai-auth', openaiAuthRoutes);
   app.use('/api/channels', channelRoutes);
   app.use('/api/pushers', pusherRoutes);
   app.use('/api/data', dataRoutes);

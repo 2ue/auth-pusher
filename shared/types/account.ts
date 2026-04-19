@@ -30,6 +30,7 @@ export interface Account {
   expiredAt: string;
   sourceType: AccountSourceType;
   source: string;
+  sourceChannelId?: string;
   importedAt: string;
   pushHistory: PushHistoryEntry[];
   lastProbe: AccountProbeState | null;
@@ -74,6 +75,7 @@ export interface AccountQuery {
   tags?: string[];
   sourceType?: AccountSourceType;
   source?: string;
+  sourceChannelId?: string;
   importDateFrom?: string;
   importDateTo?: string;
   includeDeleted?: boolean;

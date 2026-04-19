@@ -349,6 +349,7 @@ function normalizeScope(ids?: string[], query?: Omit<AccountQuery, 'limit' | 'of
     tags: query?.tags ? [...query.tags].sort() : undefined,
     sourceType: query?.sourceType,
     source: query?.source,
+    sourceChannelId: query?.sourceChannelId,
     importDateFrom: query?.importDateFrom,
     importDateTo: query?.importDateTo,
   };

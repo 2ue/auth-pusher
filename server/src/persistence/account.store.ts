@@ -18,6 +18,7 @@ interface AccountRow {
   expiredAt: string;
   sourceType: string;
   source: string;
+  sourceChannelId: string;
   importedAt: string;
   pushHistory: string;
   lastProbe: string | null;
@@ -41,6 +42,7 @@ function rowToAccount(row: AccountRow): Account {
     expiredAt: row.expiredAt,
     sourceType: (row.sourceType || 'local') as Account['sourceType'],
     source: row.source,
+    sourceChannelId: row.sourceChannelId || undefined,
     importedAt: row.importedAt,
     pushHistory: JSON.parse(row.pushHistory),
     lastProbe: row.lastProbe ? JSON.parse(row.lastProbe) : null,
@@ -57,9 +59,9 @@ const stmtAllIncludeDeleted = db.prepare<[], AccountRow>('SELECT * FROM accounts
 const stmtById = db.prepare<[string], AccountRow>('SELECT * FROM accounts WHERE id = ?');
 const stmtByEmail = db.prepare<[string], AccountRow>('SELECT * FROM accounts WHERE email = ?');
 const stmtDeleteById = db.prepare<[string]>('DELETE FROM accounts WHERE id = ?');
-const stmtUpsertByEmail = db.prepare<[string, string, string, string, string, string, string, string, string, number, string, string, string, string, string, string | null]>(
-  `INSERT INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, importedAt, pushHistory, lastProbe)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+const stmtUpsertByEmail = db.prepare(
+  `INSERT INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, sourceChannelId, importedAt, pushHistory, lastProbe)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
    ON CONFLICT(email) DO UPDATE SET
      accessToken = CASE WHEN excluded.accessToken != '' THEN excluded.accessToken ELSE accounts.accessToken END,
      refreshToken = CASE WHEN excluded.refreshToken != '' THEN excluded.refreshToken ELSE accounts.refreshToken END,
@@ -70,13 +72,18 @@ const stmtUpsertByEmail = db.prepare<[string, string, string, string, string, st
      disabled = excluded.disabled,
      expiredAt = CASE WHEN excluded.expiredAt != '' THEN excluded.expiredAt ELSE accounts.expiredAt END,
      sourceType = COALESCE(NULLIF(excluded.sourceType, ''), accounts.sourceType),
-     source = accounts.source,
+     source = CASE
+       WHEN excluded.sourceType = 'remote' AND excluded.source != '' THEN excluded.source
+       ELSE accounts.source
+     END,
+     sourceChannelId = COALESCE(NULLIF(excluded.sourceChannelId, ''), accounts.sourceChannelId),
      importedAt = accounts.importedAt,
-     deletedAt = NULL`,
+     deletedAt = NULL,
+     deleteReason = ''`,
 );
-const stmtInsert = db.prepare<[string, string, string, string, string, string, string, string, string, number, string, string, string, string, string, string | null]>(
-  `INSERT OR IGNORE INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, importedAt, pushHistory, lastProbe)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+const stmtInsert = db.prepare(
+  `INSERT OR IGNORE INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, sourceChannelId, importedAt, pushHistory, lastProbe)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
 const stmtUpdateProbe = db.prepare<[string | null, string]>('UPDATE accounts SET lastProbe = ? WHERE id = ?');
 const stmtUpdatePushHistory = db.prepare<[string, string]>('UPDATE accounts SET pushHistory = ? WHERE email = ?');
@@ -90,8 +97,8 @@ export function loadAll(includeDeleted = false): Account[] {
 
 export function save(accounts: Account[]): void {
   const stmtSaveInsert = db.prepare(
-    `INSERT OR IGNORE INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, importedAt, pushHistory, lastProbe, deletedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO accounts (id, email, accessToken, refreshToken, idToken, accountId, organizationId, planType, tags, disabled, expiredAt, sourceType, source, sourceChannelId, importedAt, pushHistory, lastProbe, batchId, deletedAt, deleteReason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const doSave = db.transaction(() => {
     db.exec('DELETE FROM accounts');
@@ -101,9 +108,12 @@ export function save(accounts: Account[]): void {
         a.accountId, a.organizationId, a.planType,
         JSON.stringify(a.tags ?? []), a.disabled ? 1 : 0,
         a.expiredAt, a.sourceType ?? inferSourceType(a.source), a.source,
+        a.sourceChannelId ?? '',
         a.importedAt, JSON.stringify(a.pushHistory),
         a.lastProbe ? JSON.stringify(a.lastProbe) : null,
+        a.batchId ?? '',
         a.deletedAt ?? null,
+        a.deleteReason ?? '',
       );
     }
   });
@@ -144,7 +154,7 @@ export function upsertBatch(incoming: Account[]): { added: number; updated: numb
           item.organizationId || '', item.planType || '',
           JSON.stringify(mergedTags), item.disabled ? 1 : 0,
           item.expiredAt || '', item.sourceType ?? '',
-          item.source, item.importedAt,
+          item.source, item.sourceChannelId ?? '', item.importedAt,
           existing.pushHistory, // keep existing pushHistory
           mergedProbe,
         );
@@ -159,7 +169,7 @@ export function upsertBatch(incoming: Account[]): { added: number; updated: numb
           item.idToken, item.accountId, item.organizationId, item.planType,
           JSON.stringify(item.tags ?? []), item.disabled ? 1 : 0,
           item.expiredAt, item.sourceType ?? inferSourceType(item.source),
-          item.source, item.importedAt,
+          item.source, item.sourceChannelId ?? '', item.importedAt,
           JSON.stringify(item.pushHistory ?? []),
           item.lastProbe ? JSON.stringify(item.lastProbe) : null,
         );
@@ -273,6 +283,10 @@ function buildFilters(q: Omit<AccountQuery, 'limit' | 'offset'>): FilterResult {
   if (q.source) {
     conditions.push('LOWER(source) LIKE ?');
     params.push(`%${q.source.toLowerCase()}%`);
+  }
+  if (q.sourceChannelId) {
+    conditions.push('sourceChannelId = ?');
+    params.push(q.sourceChannelId);
   }
   if (q.importDateFrom) {
     conditions.push('importedAt >= ?');
@@ -461,7 +475,7 @@ export interface TokenUpdate {
   organizationId?: string;
 }
 
-const stmtUpdateTokens = db.prepare<[string, string, string, string, string, string, string, string]>(
+const stmtUpdateTokens = db.prepare(
   `UPDATE accounts SET
      accessToken = CASE WHEN ? != '' THEN ? ELSE accessToken END,
      refreshToken = CASE WHEN ? != '' THEN ? ELSE refreshToken END,

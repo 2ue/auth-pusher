@@ -55,6 +55,7 @@ db.exec(`
     expiredAt TEXT NOT NULL DEFAULT '',
     sourceType TEXT NOT NULL DEFAULT 'local',
     source TEXT NOT NULL DEFAULT '',
+    sourceChannelId TEXT NOT NULL DEFAULT '',
     importedAt TEXT NOT NULL DEFAULT '',
     pushHistory TEXT NOT NULL DEFAULT '[]',
     lastProbe TEXT DEFAULT NULL,
@@ -189,6 +190,25 @@ db.exec(`
     files TEXT NOT NULL DEFAULT '[]',
     createdAt TEXT NOT NULL DEFAULT ''
   );
+
+  CREATE TABLE IF NOT EXISTS openai_oauth_file_states (
+    path TEXT PRIMARY KEY,
+    email TEXT NOT NULL DEFAULT '',
+    contentHash TEXT NOT NULL DEFAULT '',
+    matchedAccountId TEXT NOT NULL DEFAULT '',
+    matchedChannelId TEXT NOT NULL DEFAULT '',
+    matchedChannelName TEXT NOT NULL DEFAULT '',
+    matchedRemoteId TEXT NOT NULL DEFAULT '',
+    matchStatus TEXT NOT NULL DEFAULT '',
+    matchError TEXT NOT NULL DEFAULT '',
+    lastMatchedAt TEXT NOT NULL DEFAULT '',
+    lastRemoteUpdateHash TEXT NOT NULL DEFAULT '',
+    lastRemoteUpdatedAt TEXT NOT NULL DEFAULT '',
+    lastRemoteUpdateStatus TEXT NOT NULL DEFAULT '',
+    lastRemoteUpdateError TEXT NOT NULL DEFAULT '',
+    createdAt TEXT NOT NULL DEFAULT '',
+    updatedAt TEXT NOT NULL DEFAULT ''
+  );
 `);
 
 // ── Migrations (must run BEFORE indexes) ──────────────────────
@@ -203,6 +223,9 @@ if (!accountCols.some((c) => c.name === 'deleteReason')) {
 if (!accountCols.some((c) => c.name === 'batchId')) {
   db.exec("ALTER TABLE accounts ADD COLUMN batchId TEXT NOT NULL DEFAULT ''");
 }
+if (!accountCols.some((c) => c.name === 'sourceChannelId')) {
+  db.exec("ALTER TABLE accounts ADD COLUMN sourceChannelId TEXT NOT NULL DEFAULT ''");
+}
 
 // ── Indexes ─────────────────────────────────────────────────────
 
@@ -210,6 +233,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
   CREATE INDEX IF NOT EXISTS idx_accounts_planType ON accounts(planType);
   CREATE INDEX IF NOT EXISTS idx_accounts_sourceType ON accounts(sourceType);
+  CREATE INDEX IF NOT EXISTS idx_accounts_sourceChannelId ON accounts(sourceChannelId);
   CREATE INDEX IF NOT EXISTS idx_accounts_disabled ON accounts(disabled);
   CREATE INDEX IF NOT EXISTS idx_accounts_expiredAt ON accounts(expiredAt);
   CREATE INDEX IF NOT EXISTS idx_accounts_importedAt ON accounts(importedAt);
@@ -237,6 +261,8 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_import_batches_createdAt ON import_batches(createdAt);
   CREATE INDEX IF NOT EXISTS idx_accounts_batchId ON accounts(batchId);
+  CREATE INDEX IF NOT EXISTS idx_openai_oauth_file_states_email ON openai_oauth_file_states(email);
+  CREATE INDEX IF NOT EXISTS idx_openai_oauth_file_states_matchedChannelId ON openai_oauth_file_states(matchedChannelId);
 `);
 
 export default db;

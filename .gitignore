@@ -46,3 +46,4 @@ server/auth-pusher.db*
 # Sensitive data: token files and exports
 auth-data/
 04-04-ha-10/
+data/openai-oauth-json/

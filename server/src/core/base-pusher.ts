@@ -19,6 +19,19 @@ export interface RemoteAccountFull extends RemoteAccountStatus {
   remoteId?: string;
 }
 
+export interface RemoteAccountUpdateInput {
+  email: string;
+  accessToken: string;
+  refreshToken?: string;
+  idToken?: string;
+  accountId?: string;
+  organizationId?: string;
+  planType?: string;
+  clientId?: string;
+  userId?: string;
+  expiredAt?: string;
+}
+
 export abstract class BasePusher {
   abstract readonly type: string;
   abstract readonly schema: PusherSchema;
@@ -77,6 +90,18 @@ export abstract class BasePusher {
 
   /** 从远端删除指定账号 */
   async deleteAccount(_config: Record<string, unknown>, _remoteId: string): Promise<{ ok: boolean; error?: string }> {
+    return { ok: false, error: 'Not supported' };
+  }
+
+  /** 是否支持更新远端现有账号 */
+  canUpdateRemote(): boolean { return false; }
+
+  /** 更新远端已有账号 */
+  async updateRemoteAccount(
+    _config: Record<string, unknown>,
+    _remoteId: string,
+    _input: RemoteAccountUpdateInput,
+  ): Promise<{ ok: boolean; error?: string }> {
     return { ok: false, error: 'Not supported' };
   }
 

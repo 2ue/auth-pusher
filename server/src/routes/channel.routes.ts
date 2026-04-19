@@ -13,6 +13,7 @@ channelRoutes.get('/', (_req, res) => {
     capabilities: {
       syncable: channelSyncService.isSyncable(ch.pusherType),
       fetchRemote: channelSyncService.canFetchRemote(ch.pusherType),
+      updateRemote: defaultRegistry.has(ch.pusherType) ? defaultRegistry.get(ch.pusherType).canUpdateRemote() : false,
     },
   }));
   res.json(channels);
@@ -65,6 +66,7 @@ channelRoutes.get('/:id/capabilities', (req, res) => {
   res.json({
     syncable: channelSyncService.isSyncable(channel.pusherType),
     fetchRemote: channelSyncService.canFetchRemote(channel.pusherType),
+    updateRemote: defaultRegistry.has(channel.pusherType) ? defaultRegistry.get(channel.pusherType).canUpdateRemote() : false,
   });
 });
 

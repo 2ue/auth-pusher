@@ -10,7 +10,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "migrate": "tsx src/persistence/migrate-json-to-sqlite.ts",
-    "install": "npm rebuild better-sqlite3 2>/dev/null || true"
+    "install": "node ./scripts/rebuild-better-sqlite3.cjs"
   },
   "dependencies": {
     "archiver": "^7.0.1",

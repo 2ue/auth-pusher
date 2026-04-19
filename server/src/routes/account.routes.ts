@@ -66,6 +66,7 @@ function parseQuery(req: { query: Record<string, unknown> }): AccountQuery {
     tags: req.query.tags ? (req.query.tags as string).split(',') : undefined,
     sourceType,
     source: req.query.source as string | undefined,
+    sourceChannelId: req.query.sourceChannelId as string | undefined,
     importDateFrom: req.query.importDateFrom as string | undefined,
     importDateTo: req.query.importDateTo as string | undefined,
     includeDeleted: req.query.includeDeleted === 'true' ? true : undefined,
@@ -189,6 +190,7 @@ accountRoutes.post('/usage-jobs', (req, res) => {
         tags: query.tags,
         sourceType: query.sourceType,
         source: query.source,
+        sourceChannelId: query.sourceChannelId,
         importDateFrom: query.importDateFrom,
         importDateTo: query.importDateTo,
       } : undefined,
@@ -213,6 +215,7 @@ accountRoutes.get('/usage-jobs/latest', (req, res) => {
       tags: query.tags,
       sourceType: query.sourceType,
       source: query.source,
+      sourceChannelId: query.sourceChannelId,
       importDateFrom: query.importDateFrom,
       importDateTo: query.importDateTo,
     },
@@ -239,6 +242,7 @@ accountRoutes.get('/quota-archives/latest', (req, res) => {
       tags: query.tags,
       sourceType: query.sourceType,
       source: query.source,
+      sourceChannelId: query.sourceChannelId,
       importDateFrom: query.importDateFrom,
       importDateTo: query.importDateTo,
     },
@@ -427,6 +431,7 @@ accountRoutes.get('/export', (req, res) => {
     if (req.query.tags) q.tags = String(req.query.tags).split(',');
     if (req.query.sourceType) q.sourceType = String(req.query.sourceType) as AccountSourceType;
     if (req.query.source) q.source = String(req.query.source);
+    if (req.query.sourceChannelId) q.sourceChannelId = String(req.query.sourceChannelId);
     if (req.query.batchId) q.batchId = String(req.query.batchId);
 
     const rawFormat = String(req.query.format ?? 'raw').trim().toLowerCase();

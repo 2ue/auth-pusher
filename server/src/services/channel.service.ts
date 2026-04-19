@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid';
 import type { ChannelConfig } from '../../../shared/types/channel.js';
 import * as store from '../persistence/channel.store.js';
 import { defaultRegistry } from '../pushers/index.js';
+import { syncAccountChannelLinksForChannel } from './account-channel-link.service.js';
 
 export function listChannels(): ChannelConfig[] {
   return store.loadChannels();
@@ -58,6 +59,7 @@ export function updateChannel(id: string, input: {
 }): ChannelConfig {
   const existing = store.findChannel(id);
   if (!existing) throw new Error(`渠道不存在: ${id}`);
+  const previousName = existing.name;
 
   const updated: ChannelConfig = {
     ...existing,
@@ -80,6 +82,7 @@ export function updateChannel(id: string, input: {
   }
 
   store.upsertChannel(updated);
+  syncAccountChannelLinksForChannel(updated.id, previousName);
   return updated;
 }
 

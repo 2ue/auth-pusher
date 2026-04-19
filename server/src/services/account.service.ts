@@ -47,7 +47,7 @@ export function importFromRecords(
   fieldMapping: FieldMapping,
   source: string,
   options?: ImportOptions,
-): { added: number; updated: number; skipped: number } {
+): { added: number; updated: number; skipped: number; batchId: string } {
   const mapped = applyFieldMapping(records, fieldMapping, ['email']);
   const valid = mapped.filter((m) => m.valid);
   const tags = options?.tags ?? [];
@@ -115,6 +115,7 @@ function buildAccount(fields: Record<string, unknown>, source: string): Account 
     expiredAt,
     sourceType: 'local',
     source,
+    sourceChannelId: undefined,
     importedAt: new Date().toISOString(),
     pushHistory: [],
     lastProbe: null,

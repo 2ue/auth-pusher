@@ -85,6 +85,7 @@ interface Account {
   expiredAt: string;
   sourceType: 'local' | 'remote';
   source: string;
+  sourceChannelId?: string;
   importedAt: string;
   pushHistory: { channelId: string; channelName: string; status: string; at: string }[];
   lastProbe: AccountProbeState | null;
@@ -176,8 +177,12 @@ function groupByChannel(h: Account['pushHistory']): Record<string, Account['push
   return m;
 }
 
-function formatSourceLabel(account: Account): string {
+function formatSourceLabel(account: Account, channels: Channel[]): string {
   if (account.sourceType === 'remote') {
+    if (account.sourceChannelId) {
+      const matched = channels.find((channel) => channel.id === account.sourceChannelId);
+      if (matched) return matched.name;
+    }
     return account.source.startsWith('sync:') ? account.source.slice(5) : account.source;
   }
   return account.source || '本地导入';
@@ -202,12 +207,14 @@ function appendScopeParams(params: URLSearchParams, scope: {
   tags?: string[];
   sourceType?: '' | 'local' | 'remote';
   source?: string;
+  sourceChannelId?: string;
 }) {
   if (scope.planType) params.set('planType', scope.planType);
   if (scope.search) params.set('search', scope.search);
   if (scope.tags && scope.tags.length > 0) params.set('tags', scope.tags.join(','));
   if (scope.sourceType) params.set('sourceType', scope.sourceType);
   if (scope.source) params.set('source', scope.source);
+  if (scope.sourceChannelId) params.set('sourceChannelId', scope.sourceChannelId);
 }
 
 const PLAN_OPTIONS = [
@@ -567,16 +574,16 @@ export default function AccountPoolPage() {
   const loadBatches = () => get<typeof batches>('/accounts/batches').then(setBatches);
 
   const buildScopeQuery = useCallback(() => {
-    // 渠道 tab 下用 sync tag 筛选，同时保留用户手动选的 tag
     const tagsList: string[] = [];
-    if (!isAllTab && activeChannel) tagsList.push(`sync:${activeChannel.name}`);
     if (filter.tag) tagsList.push(filter.tag);
     return {
-    planType: filter.planType || undefined,
-    search: filter.search || undefined,
-    tags: tagsList.length > 0 ? tagsList : undefined,
-    sourceType: isAllTab ? (filter.sourceType || undefined) : undefined,
-  }; }, [activeChannel, filter.planType, filter.search, filter.sourceType, filter.tag, isAllTab]);
+      planType: filter.planType || undefined,
+      search: filter.search || undefined,
+      tags: tagsList.length > 0 ? tagsList : undefined,
+      sourceType: isAllTab ? (filter.sourceType || undefined) : undefined,
+      sourceChannelId: !isAllTab && activeChannel ? activeChannel.id : undefined,
+    };
+  }, [activeChannel, filter.planType, filter.search, filter.sourceType, filter.tag, isAllTab]);
 
   const fetchLatestUsageState = useCallback(() => {
     const params = new URLSearchParams();
@@ -617,7 +624,7 @@ export default function AccountPoolPage() {
     if (filter.batchId) p.set('batchId', filter.batchId);
     if (isRecycleBin) { p.set('onlyDeleted', 'true'); }
     else if (isAllTab) { if (filter.sourceType) p.set('sourceType', filter.sourceType); }
-    else if (activeChannel) { p.set('tags', `sync:${activeChannel.name}`); }
+    else if (activeChannel) { p.set('sourceChannelId', activeChannel.id); }
     p.set('limit', String(ps));
     p.set('offset', String(pg * ps));
 
@@ -628,7 +635,7 @@ export default function AccountPoolPage() {
     if (filter.tag) sp.set('tags', filter.tag);
     if (isRecycleBin) { sp.set('onlyDeleted', 'true'); }
     else if (isAllTab) { if (filter.sourceType) sp.set('sourceType', filter.sourceType); }
-    else if (activeChannel) { sp.set('tags', `sync:${activeChannel.name}`); }
+    else if (activeChannel) { sp.set('sourceChannelId', activeChannel.id); }
 
     Promise.all([
       getWithTotal<Account[]>(`/accounts?${p}`),
@@ -662,16 +669,20 @@ export default function AccountPoolPage() {
     } else {
       const firstSelected = accounts.find(a => selected.has(a.id));
       if (firstSelected) {
-        const syncTag = (firstSelected.tags ?? []).find(t => t.startsWith('sync:'));
-        if (syncTag) {
-          const channelName = syncTag.slice(5);
-          const ch = channels.find(c => c.name === channelName);
-          if (ch) sourceChannelId = ch.id;
+        if (firstSelected.sourceChannelId) {
+          sourceChannelId = firstSelected.sourceChannelId;
+        } else {
+          const syncTag = (firstSelected.tags ?? []).find(t => t.startsWith('sync:'));
+          if (syncTag) {
+            const channelName = syncTag.slice(5);
+            const ch = channels.find(c => c.name === channelName);
+            if (ch) sourceChannelId = ch.id;
+          }
         }
       }
     }
     if (!sourceChannelId) {
-      notify({ tone: 'error', title: '无法确定源渠道', description: '请在渠道 Tab 下操作，或确保账号有 sync: 标签' });
+      notify({ tone: 'error', title: '无法确定源渠道', description: '请在渠道 Tab 下操作，或确保账号保留了来源渠道信息' });
       return;
     }
 
@@ -970,7 +981,7 @@ export default function AccountPoolPage() {
               if (filter.search) params.set('search', filter.search);
               if (filter.tag) params.set('tags', filter.tag);
               if (isAllTab && filter.sourceType) params.set('sourceType', filter.sourceType);
-              if (!isAllTab && activeChannel) params.set('source', `sync:${activeChannel.name}`);
+              if (!isAllTab && activeChannel) params.set('sourceChannelId', activeChannel.id);
               window.open(`/api/accounts/export?${params}`, '_blank');
             }}>导出</Button>
             {isAllTab && (
@@ -1316,7 +1327,7 @@ export default function AccountPoolPage() {
                           <Badge variant={account.sourceType === 'remote' ? 'info' : 'muted'}>
                             {account.sourceType === 'remote' ? '远端' : '本地'}
                           </Badge>
-                          <span className="text-muted-foreground text-xs">{formatSourceLabel(account)}</span>
+                          <span className="text-muted-foreground text-xs">{formatSourceLabel(account, channels)}</span>
                         </div>
                         {isAllTab && account.pushHistory.length > 0 && (
                           <div className="flex gap-1 flex-wrap">

@@ -53,6 +53,7 @@ export async function syncFromChannel(channelId: string): Promise<{
   for (const acc of remoteAccounts) {
     acc.sourceType = 'remote';
     acc.source = syncTag;
+    acc.sourceChannelId = channelId;
     acc.tags = [...new Set([...(acc.tags ?? []), syncTag])];
     // 远端重新出现后，清理历史状态标签
     acc.tags = acc.tags.filter((t) => t !== deletedTag && t !== transferredTag);
@@ -92,6 +93,8 @@ export async function syncFromChannel(channelId: string): Promise<{
       // 远端已删除：加 deleted 标签 + 软删除
       if (!tags.includes(deletedTag)) {
         local.tags = [...tags, deletedTag];
+        local.deletedAt = new Date().toISOString();
+        local.deleteReason = 'sync_removed';
         deletedCount++;
         changed = true;
         accountStore.softDelete(local.id, 'sync_removed');
@@ -101,7 +104,11 @@ export async function syncFromChannel(channelId: string): Promise<{
       if (tags.includes(deletedTag) || tags.includes(transferredTag)) {
         local.tags = tags.filter((t) => t !== deletedTag && t !== transferredTag);
         changed = true;
-        if (local.deletedAt) accountStore.restore(local.id);
+        if (local.deletedAt) {
+          local.deletedAt = undefined;
+          local.deleteReason = '';
+          accountStore.restore(local.id);
+        }
       }
     }
   }
