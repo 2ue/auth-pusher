@@ -2,7 +2,7 @@ import { Router } from 'express';
 import type { AppSettings } from '../../../shared/types/settings.js';
 import * as settingsStore from '../persistence/settings.store.js';
 
-export const settingsRoutes = Router();
+export const settingsRoutes: ReturnType<typeof Router> = Router();
 
 settingsRoutes.get('/', (_req, res) => {
   res.json(settingsStore.load());

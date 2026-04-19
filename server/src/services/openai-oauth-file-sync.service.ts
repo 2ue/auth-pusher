@@ -5,15 +5,16 @@ import { nanoid } from 'nanoid';
 import type { Account } from '../../../shared/types/account.js';
 import type { ChannelConfig } from '../../../shared/types/channel.js';
 import type { RemoteAccountFull } from '../core/base-pusher.js';
+import type { ChannelCapabilities } from '../channels/base-channel.js';
 import * as accountStore from '../persistence/account.store.js';
 import * as channelStore from '../persistence/channel.store.js';
 import * as fileStateStore from '../persistence/openai-oauth-file-state.store.js';
-import { defaultRegistry } from '../pushers/index.js';
 import {
   getOpenAiOAuthOutputDir,
   type OpenAiOAuthCapturedJson,
   type OpenAiOAuthSavedFile,
 } from './openai-oauth-capture.service.js';
+import * as channelRemoteService from './channel-remote.service.js';
 import {
   decodeIdTokenEmail,
   decodeIdTokenOrg,
@@ -71,12 +72,19 @@ export interface ManagedOpenAiOAuthFile extends OpenAiOAuthSavedFile {
   matchedRemoteId?: string;
   matchStatus?: OpenAiOAuthMatchStatus;
   matchError?: string;
+  remoteCapabilities?: ChannelCapabilities;
   syncStatus: OpenAiOAuthSyncStatus;
   canRemoteUpdate: boolean;
+  canForceRemoteUpdate: boolean;
+  canResetRemoteStateAndEnableScheduling: boolean;
   lastMatchedAt?: string;
   lastRemoteUpdatedAt?: string;
   lastRemoteUpdateStatus?: string;
   lastRemoteUpdateError?: string;
+  lastRemoteActionType?: string;
+  lastRemoteActionAt?: string;
+  lastRemoteActionStatus?: string;
+  lastRemoteActionError?: string;
 }
 
 export interface OpenAiOAuthManagedFilesResult {
@@ -104,8 +112,14 @@ export interface OpenAiOAuthMatchResult {
   files: ManagedOpenAiOAuthFile[];
 }
 
-export interface OpenAiOAuthUpdateResult {
+export type OpenAiOAuthRemoteActionType =
+  | 'update_remote'
+  | 'force_update_remote'
+  | 'reset_remote_state_and_enable_scheduling';
+
+export interface OpenAiOAuthRemoteActionResult {
   dryRun: boolean;
+  action: OpenAiOAuthRemoteActionType;
   updated: number;
   skipped: number;
   failed: number;
@@ -113,6 +127,7 @@ export interface OpenAiOAuthUpdateResult {
     path: string;
     email: string;
     status: 'updated' | 'would_update' | 'skipped' | 'failed';
+    action: OpenAiOAuthRemoteActionType;
     channelName?: string;
     remoteId?: string;
     error?: string;
@@ -315,11 +330,14 @@ export async function matchManagedOpenAiOAuthFiles(filePaths: string[]): Promise
 export async function updateMatchedRemoteFiles(input: {
   filePaths: string[];
   dryRun?: boolean;
-}): Promise<OpenAiOAuthUpdateResult> {
+  force?: boolean;
+}): Promise<OpenAiOAuthRemoteActionResult> {
   const dryRun = input.dryRun === true;
+  const force = input.force === true;
+  const action: OpenAiOAuthRemoteActionType = force ? 'force_update_remote' : 'update_remote';
   const selected = resolveSelectedFiles(input.filePaths);
   const remoteCache = new Map<string, Promise<RemoteCacheEntry>>();
-  const items: OpenAiOAuthUpdateResult['items'] = [];
+  const items: OpenAiOAuthRemoteActionResult['items'] = [];
   let updated = 0;
   let skipped = 0;
   let failed = 0;
@@ -339,6 +357,7 @@ export async function updateMatchedRemoteFiles(input: {
         path: item.savedFile.path,
         email: labelEmail,
         status: 'failed',
+        action,
         error: item.parseError ?? 'JSON 解析失败',
       });
       failed += 1;
@@ -360,21 +379,25 @@ export async function updateMatchedRemoteFiles(input: {
     });
 
     if (outcome.status !== 'matched' || !outcome.matchedChannel || !outcome.matchedRemote?.remoteId) {
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'failed', outcome.error ?? '未能匹配到可更新的远端号池');
       items.push({
         path: item.savedFile.path,
         email: item.normalized.email,
         status: 'failed',
+        action,
         error: outcome.error ?? '未能匹配到可更新的远端号池',
       });
       failed += 1;
       continue;
     }
 
-    if (state.lastRemoteUpdateHash === item.contentHash && state.lastRemoteUpdateStatus === 'success') {
+    if (!force && state.lastRemoteUpdateHash === item.contentHash && state.lastRemoteUpdateStatus === 'success') {
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'skipped', 'JSON 未变化，已禁止重复远端更新');
       items.push({
         path: item.savedFile.path,
         email: item.normalized.email,
         status: 'skipped',
+        action,
         channelName: outcome.matchedChannel.name,
         remoteId: outcome.matchedRemote.remoteId,
         error: 'JSON 未变化，已禁止重复远端更新',
@@ -383,12 +406,21 @@ export async function updateMatchedRemoteFiles(input: {
       continue;
     }
 
-    const pusher = defaultRegistry.get(outcome.matchedChannel.pusherType);
-    if (!pusher.canUpdateRemote()) {
+    const capabilities = channelRemoteService.getChannelCapabilities(outcome.matchedChannel);
+    if (!capabilities.updateRemote) {
+      recordRemoteActionState(
+        item,
+        outcome,
+        item.contentHash,
+        action,
+        'failed',
+        `渠道类型 ${outcome.matchedChannel.pusherType} 暂不支持远端更新`,
+      );
       items.push({
         path: item.savedFile.path,
         email: item.normalized.email,
         status: 'failed',
+        action,
         channelName: outcome.matchedChannel.name,
         remoteId: outcome.matchedRemote.remoteId,
         error: `渠道类型 ${outcome.matchedChannel.pusherType} 暂不支持远端更新`,
@@ -402,6 +434,7 @@ export async function updateMatchedRemoteFiles(input: {
         path: item.savedFile.path,
         email: item.normalized.email,
         status: 'would_update',
+        action,
         channelName: outcome.matchedChannel.name,
         remoteId: outcome.matchedRemote.remoteId,
       });
@@ -409,24 +442,15 @@ export async function updateMatchedRemoteFiles(input: {
       continue;
     }
 
-    const result = await pusher.updateRemoteAccount(
-      outcome.matchedChannel.pusherConfig,
+    const result = await channelRemoteService.updateRemoteAccount(
+      outcome.matchedChannel,
       outcome.matchedRemote.remoteId,
-      {
-        email: item.normalized.email,
-        accessToken: item.normalized.accessToken,
-        refreshToken: item.normalized.refreshToken || undefined,
-        idToken: item.normalized.idToken || undefined,
-        accountId: item.normalized.accountId || undefined,
-        organizationId: item.normalized.organizationId || undefined,
-        planType: item.normalized.planType || undefined,
-        clientId: item.normalized.clientId || undefined,
-        userId: item.normalized.userId || undefined,
-        expiredAt: item.normalized.expiredAt || undefined,
-      },
+      buildRemoteUpdateInput(item.normalized),
+      { force },
     );
 
     if (!result.ok) {
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'failed', result.error ?? '远端更新失败');
       fileStateStore.upsert({
         path: item.savedFile.path,
         email: item.normalized.email,
@@ -445,6 +469,7 @@ export async function updateMatchedRemoteFiles(input: {
         path: item.savedFile.path,
         email: item.normalized.email,
         status: 'failed',
+        action,
         channelName: outcome.matchedChannel.name,
         remoteId: outcome.matchedRemote.remoteId,
         error: result.error ?? '远端更新失败',
@@ -470,19 +495,196 @@ export async function updateMatchedRemoteFiles(input: {
       lastRemoteUpdatedAt: new Date().toISOString(),
       lastRemoteUpdateStatus: 'success',
       lastRemoteUpdateError: '',
+      lastRemoteActionType: action,
+      lastRemoteActionAt: new Date().toISOString(),
+      lastRemoteActionStatus: 'success',
+      lastRemoteActionError: '',
     });
 
     items.push({
       path: item.savedFile.path,
       email: item.normalized.email,
       status: 'updated',
+      action,
       channelName: outcome.matchedChannel.name,
       remoteId: outcome.matchedRemote.remoteId,
     });
     updated += 1;
   }
 
-  return { dryRun, updated, skipped, failed, items };
+  return { dryRun, action, updated, skipped, failed, items };
+}
+
+export async function resetMatchedRemoteStateAndEnableScheduling(input: {
+  filePaths: string[];
+  dryRun?: boolean;
+}): Promise<OpenAiOAuthRemoteActionResult> {
+  const dryRun = input.dryRun === true;
+  const action: OpenAiOAuthRemoteActionType = 'reset_remote_state_and_enable_scheduling';
+  const selected = resolveSelectedFiles(input.filePaths);
+  const remoteCache = new Map<string, Promise<RemoteCacheEntry>>();
+  const items: OpenAiOAuthRemoteActionResult['items'] = [];
+  let updated = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const item of selected) {
+    const labelEmail = item.normalized?.email || item.savedFile.email;
+    if (!item.normalized || !item.contentHash) {
+      recordParseFailure(item, labelEmail);
+      items.push({
+        path: item.savedFile.path,
+        email: labelEmail,
+        status: 'failed',
+        action,
+        error: item.parseError ?? 'JSON 解析失败',
+      });
+      failed += 1;
+      continue;
+    }
+
+    const outcome = await resolveMatch(item.normalized, remoteCache);
+    fileStateStore.upsert({
+      path: item.savedFile.path,
+      email: item.normalized.email,
+      contentHash: item.contentHash,
+      matchedAccountId: outcome.localAccount?.id,
+      matchedChannelId: outcome.matchedChannel?.id,
+      matchedChannelName: outcome.matchedChannel?.name,
+      matchedRemoteId: outcome.matchedRemote?.remoteId,
+      matchStatus: outcome.status,
+      matchError: outcome.error ?? '',
+      lastMatchedAt: new Date().toISOString(),
+    });
+
+    if (outcome.status !== 'matched' || !outcome.matchedChannel || !outcome.matchedRemote?.remoteId) {
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'failed', outcome.error ?? '未能匹配到可操作的远端账号');
+      items.push({
+        path: item.savedFile.path,
+        email: item.normalized.email,
+        status: 'failed',
+        action,
+        error: outcome.error ?? '未能匹配到可操作的远端账号',
+      });
+      failed += 1;
+      continue;
+    }
+
+    const capabilities = channelRemoteService.getChannelCapabilities(outcome.matchedChannel);
+    if (!capabilities.resetAndEnableScheduling) {
+      const error = `渠道类型 ${outcome.matchedChannel.pusherType} 暂不支持“重置远端状态 + 打开调度”`;
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'failed', error);
+      items.push({
+        path: item.savedFile.path,
+        email: item.normalized.email,
+        status: 'failed',
+        action,
+        channelName: outcome.matchedChannel.name,
+        remoteId: outcome.matchedRemote.remoteId,
+        error,
+      });
+      failed += 1;
+      continue;
+    }
+
+    if (dryRun) {
+      items.push({
+        path: item.savedFile.path,
+        email: item.normalized.email,
+        status: 'would_update',
+        action,
+        channelName: outcome.matchedChannel.name,
+        remoteId: outcome.matchedRemote.remoteId,
+      });
+      skipped += 1;
+      continue;
+    }
+
+    const result = await channelRemoteService.resetRemoteStateAndEnableScheduling(
+      outcome.matchedChannel,
+      outcome.matchedRemote.remoteId,
+    );
+
+    if (!result.ok) {
+      recordRemoteActionState(item, outcome, item.contentHash, action, 'failed', result.error ?? '重置远端状态失败');
+      items.push({
+        path: item.savedFile.path,
+        email: item.normalized.email,
+        status: 'failed',
+        action,
+        channelName: outcome.matchedChannel.name,
+        remoteId: outcome.matchedRemote.remoteId,
+        error: result.error ?? '重置远端状态失败',
+      });
+      failed += 1;
+      continue;
+    }
+
+    recordRemoteActionState(item, outcome, item.contentHash, action, 'success', '');
+    items.push({
+      path: item.savedFile.path,
+      email: item.normalized.email,
+      status: 'updated',
+      action,
+      channelName: outcome.matchedChannel.name,
+      remoteId: outcome.matchedRemote.remoteId,
+    });
+    updated += 1;
+  }
+
+  return { dryRun, action, updated, skipped, failed, items };
+}
+
+function buildRemoteUpdateInput(record: NormalizedOpenAiOAuthJson) {
+  return {
+    email: record.email,
+    accessToken: record.accessToken,
+    refreshToken: record.refreshToken || undefined,
+    idToken: record.idToken || undefined,
+    accountId: record.accountId || undefined,
+    organizationId: record.organizationId || undefined,
+    planType: record.planType || undefined,
+    clientId: record.clientId || undefined,
+    userId: record.userId || undefined,
+    expiredAt: record.expiredAt || undefined,
+  };
+}
+
+function recordParseFailure(item: ParsedOpenAiOAuthFile, email: string): void {
+  fileStateStore.upsert({
+    path: item.savedFile.path,
+    email,
+    contentHash: item.contentHash ?? '',
+    matchStatus: 'parse_error',
+    matchError: item.parseError ?? 'JSON 解析失败',
+    lastMatchedAt: new Date().toISOString(),
+  });
+}
+
+function recordRemoteActionState(
+  item: ParsedOpenAiOAuthFile,
+  outcome: MatchOutcome,
+  contentHash: string,
+  action: OpenAiOAuthRemoteActionType,
+  status: 'success' | 'failed' | 'skipped',
+  error: string,
+): void {
+  fileStateStore.upsert({
+    path: item.savedFile.path,
+    email: item.normalized?.email ?? item.savedFile.email,
+    contentHash,
+    matchedAccountId: outcome.localAccount?.id,
+    matchedChannelId: outcome.matchedChannel?.id,
+    matchedChannelName: outcome.matchedChannel?.name,
+    matchedRemoteId: outcome.matchedRemote?.remoteId,
+    matchStatus: outcome.status,
+    matchError: outcome.error ?? '',
+    lastMatchedAt: new Date().toISOString(),
+    lastRemoteActionType: action,
+    lastRemoteActionAt: new Date().toISOString(),
+    lastRemoteActionStatus: status,
+    lastRemoteActionError: error,
+  });
 }
 
 function resolveSelectedFiles(filePaths: string[]): ParsedOpenAiOAuthFile[] {
@@ -526,6 +728,12 @@ function readOpenAiOAuthFile(savedFile: OpenAiOAuthSavedFile): ParsedOpenAiOAuth
 function toManagedFile(parsed: ParsedOpenAiOAuthFile): ManagedOpenAiOAuthFile {
   const state = parsed.state;
   const matchStatus = (state?.matchStatus || undefined) as OpenAiOAuthMatchStatus | undefined;
+  const matchedChannel = state?.matchedChannelId
+    ? channelStore.findChannel(state.matchedChannelId)
+    : undefined;
+  const remoteCapabilities = matchedChannel
+    ? channelRemoteService.getChannelCapabilities(matchedChannel)
+    : undefined;
   const hasSuccessfulRemoteSync = Boolean(
     parsed.contentHash
     && state?.lastRemoteUpdateStatus === 'success'
@@ -554,12 +762,29 @@ function toManagedFile(parsed: ParsedOpenAiOAuthFile): ManagedOpenAiOAuthFile {
     matchedRemoteId: state?.matchedRemoteId,
     matchStatus,
     matchError: state?.matchError,
+    remoteCapabilities,
     syncStatus,
-    canRemoteUpdate: syncStatus === 'ready',
+    canRemoteUpdate: syncStatus === 'ready' && remoteCapabilities?.updateRemote === true,
+    canForceRemoteUpdate: Boolean(
+      parsed.contentHash
+      && matchStatus === 'matched'
+      && state?.matchedRemoteId
+      && remoteCapabilities?.forceUpdateRemote,
+    ),
+    canResetRemoteStateAndEnableScheduling: Boolean(
+      parsed.contentHash
+      && matchStatus === 'matched'
+      && state?.matchedRemoteId
+      && remoteCapabilities?.resetAndEnableScheduling,
+    ),
     lastMatchedAt: state?.lastMatchedAt,
     lastRemoteUpdatedAt: state?.lastRemoteUpdatedAt,
     lastRemoteUpdateStatus: state?.lastRemoteUpdateStatus,
     lastRemoteUpdateError: state?.lastRemoteUpdateError,
+    lastRemoteActionType: state?.lastRemoteActionType,
+    lastRemoteActionAt: state?.lastRemoteActionAt,
+    lastRemoteActionStatus: state?.lastRemoteActionStatus,
+    lastRemoteActionError: state?.lastRemoteActionError,
   };
 }
 
@@ -581,8 +806,8 @@ async function resolveMatch(
       };
     }
 
-    const pusher = defaultRegistry.get(channel.pusherType);
-    if (!pusher.canUpdateRemote()) {
+    const capabilities = channelRemoteService.getChannelCapabilities(channel);
+    if (!capabilities.updateRemote) {
       return {
         localAccount,
         matchedChannel: channel,
@@ -616,9 +841,8 @@ async function resolveMatch(
 
   const channels = channelStore.loadChannels()
     .filter((channel) => {
-      if (!defaultRegistry.has(channel.pusherType)) return false;
-      const pusher = defaultRegistry.get(channel.pusherType);
-      return pusher.canFetchRemote() && pusher.canUpdateRemote();
+      const capabilities = channelRemoteService.getChannelCapabilities(channel);
+      return capabilities.fetchRemote && capabilities.updateRemote;
     });
 
   const candidates: Array<{ channel: ChannelConfig; remote: RemoteAccountFull }> = [];
@@ -669,8 +893,7 @@ function loadRemoteAccounts(
 
   const promise = (async () => {
     try {
-      const pusher = defaultRegistry.get(channel.pusherType);
-      const accounts = await pusher.fetchRemoteAccounts(channel.pusherConfig);
+      const accounts = await channelRemoteService.fetchRemoteAccounts(channel);
       return { ok: true, accounts } satisfies RemoteCacheEntry;
     } catch (err) {
       return {

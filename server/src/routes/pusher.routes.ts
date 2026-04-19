@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { defaultRegistry } from '../pushers/index.js';
 
-export const pusherRoutes = Router();
+export const pusherRoutes: ReturnType<typeof Router> = Router();
 
 pusherRoutes.get('/', (_req, res) => {
   const schemas = defaultRegistry.list().map((p) => p.schema);

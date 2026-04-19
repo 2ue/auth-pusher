@@ -1,19 +1,19 @@
 import { Router } from 'express';
 import * as channelService from '../services/channel.service.js';
 import * as channelSyncService from '../services/channel-sync.service.js';
+import * as channelRemoteService from '../services/channel-remote.service.js';
 import * as usageProbeService from '../services/usage-probe.service.js';
 import { defaultRegistry } from '../pushers/index.js';
 import { Sub2ApiPusher } from '../pushers/sub2api.pusher.js';
 
-export const channelRoutes = Router();
+export const channelRoutes: ReturnType<typeof Router> = Router();
 
 channelRoutes.get('/', (_req, res) => {
   const channels = channelService.listChannels().map((ch) => ({
     ...ch,
     capabilities: {
       syncable: channelSyncService.isSyncable(ch.pusherType),
-      fetchRemote: channelSyncService.canFetchRemote(ch.pusherType),
-      updateRemote: defaultRegistry.has(ch.pusherType) ? defaultRegistry.get(ch.pusherType).canUpdateRemote() : false,
+      ...channelRemoteService.getChannelCapabilities(ch),
     },
   }));
   res.json(channels);
@@ -65,15 +65,14 @@ channelRoutes.get('/:id/capabilities', (req, res) => {
   if (!channel) return res.status(404).json({ error: '渠道不存在' });
   res.json({
     syncable: channelSyncService.isSyncable(channel.pusherType),
-    fetchRemote: channelSyncService.canFetchRemote(channel.pusherType),
-    updateRemote: defaultRegistry.has(channel.pusherType) ? defaultRegistry.get(channel.pusherType).canUpdateRemote() : false,
+    ...channelRemoteService.getChannelCapabilities(channel),
   });
 });
 
 /** 获取远端账号列表（脱敏，不含 accessToken） */
 channelRoutes.get('/:id/remote-accounts', async (req, res) => {
   try {
-    const full = await channelSyncService.fetchRemoteAccounts(req.params.id);
+    const full = await channelRemoteService.fetchRemoteAccountsByChannelId(req.params.id);
     // 脱敏：去掉 accessToken
     const accounts = full.map(({ accessToken: _, ...rest }) => rest);
     res.json({ accounts, total: accounts.length });

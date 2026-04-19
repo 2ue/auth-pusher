@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import * as tagStore from '../persistence/tag.store.js';
 
-export const tagRoutes = Router();
+export const tagRoutes: ReturnType<typeof Router> = Router();
 
 tagRoutes.get('/', (_req, res) => {
   res.json(tagStore.getAllUnique());

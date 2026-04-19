@@ -3,7 +3,7 @@ import * as pushService from '../services/push.service.js';
 import * as taskService from '../services/task.service.js';
 import * as accountStore from '../persistence/account.store.js';
 
-export const pushRoutes = Router();
+export const pushRoutes: ReturnType<typeof Router> = Router();
 
 pushRoutes.post('/execute', async (req, res) => {
   try {

@@ -15,6 +15,10 @@ export interface OpenAiOAuthFileState {
   lastRemoteUpdatedAt?: string;
   lastRemoteUpdateStatus?: string;
   lastRemoteUpdateError?: string;
+  lastRemoteActionType?: string;
+  lastRemoteActionAt?: string;
+  lastRemoteActionStatus?: string;
+  lastRemoteActionError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,6 +38,10 @@ interface OpenAiOAuthFileStateRow {
   lastRemoteUpdatedAt: string;
   lastRemoteUpdateStatus: string;
   lastRemoteUpdateError: string;
+  lastRemoteActionType: string;
+  lastRemoteActionAt: string;
+  lastRemoteActionStatus: string;
+  lastRemoteActionError: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,6 +62,10 @@ function rowToState(row: OpenAiOAuthFileStateRow): OpenAiOAuthFileState {
     lastRemoteUpdatedAt: row.lastRemoteUpdatedAt || undefined,
     lastRemoteUpdateStatus: row.lastRemoteUpdateStatus || undefined,
     lastRemoteUpdateError: row.lastRemoteUpdateError || undefined,
+    lastRemoteActionType: row.lastRemoteActionType || undefined,
+    lastRemoteActionAt: row.lastRemoteActionAt || undefined,
+    lastRemoteActionStatus: row.lastRemoteActionStatus || undefined,
+    lastRemoteActionError: row.lastRemoteActionError || undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -65,9 +77,10 @@ const stmtUpsert = db.prepare(
   `INSERT INTO openai_oauth_file_states (
       path, email, contentHash, matchedAccountId, matchedChannelId, matchedChannelName, matchedRemoteId,
       matchStatus, matchError, lastMatchedAt, lastRemoteUpdateHash, lastRemoteUpdatedAt,
-      lastRemoteUpdateStatus, lastRemoteUpdateError, createdAt, updatedAt
+      lastRemoteUpdateStatus, lastRemoteUpdateError, lastRemoteActionType, lastRemoteActionAt,
+      lastRemoteActionStatus, lastRemoteActionError, createdAt, updatedAt
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(path) DO UPDATE SET
       email = excluded.email,
       contentHash = excluded.contentHash,
@@ -82,6 +95,10 @@ const stmtUpsert = db.prepare(
       lastRemoteUpdatedAt = excluded.lastRemoteUpdatedAt,
       lastRemoteUpdateStatus = excluded.lastRemoteUpdateStatus,
       lastRemoteUpdateError = excluded.lastRemoteUpdateError,
+      lastRemoteActionType = excluded.lastRemoteActionType,
+      lastRemoteActionAt = excluded.lastRemoteActionAt,
+      lastRemoteActionStatus = excluded.lastRemoteActionStatus,
+      lastRemoteActionError = excluded.lastRemoteActionError,
       updatedAt = excluded.updatedAt`,
 );
 
@@ -109,6 +126,10 @@ export function upsert(input: {
   lastRemoteUpdatedAt?: string;
   lastRemoteUpdateStatus?: string;
   lastRemoteUpdateError?: string;
+  lastRemoteActionType?: string;
+  lastRemoteActionAt?: string;
+  lastRemoteActionStatus?: string;
+  lastRemoteActionError?: string;
 }): OpenAiOAuthFileState {
   const now = new Date().toISOString();
   const existing = findByPath(input.path);
@@ -127,6 +148,10 @@ export function upsert(input: {
     input.lastRemoteUpdatedAt ?? existing?.lastRemoteUpdatedAt ?? '',
     input.lastRemoteUpdateStatus ?? existing?.lastRemoteUpdateStatus ?? '',
     input.lastRemoteUpdateError ?? existing?.lastRemoteUpdateError ?? '',
+    input.lastRemoteActionType ?? existing?.lastRemoteActionType ?? '',
+    input.lastRemoteActionAt ?? existing?.lastRemoteActionAt ?? '',
+    input.lastRemoteActionStatus ?? existing?.lastRemoteActionStatus ?? '',
+    input.lastRemoteActionError ?? existing?.lastRemoteActionError ?? '',
     existing?.createdAt ?? now,
     now,
   );

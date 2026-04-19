@@ -11,6 +11,7 @@ import {
   importOpenAiOAuthJsonFiles,
   listManagedOpenAiOAuthFiles,
   matchManagedOpenAiOAuthFiles,
+  resetMatchedRemoteStateAndEnableScheduling,
   updateMatchedRemoteFiles,
 } from '../services/openai-oauth-file-sync.service.js';
 import { logger } from '../utils/logger.js';
@@ -293,10 +294,25 @@ openaiAuthRoutes.post('/update-remote', async (req, res) => {
     ? req.body.filePaths.map((item: unknown) => String(item))
     : [];
   const dryRun = req.body?.dryRun === true;
+  const force = req.body?.force === true;
   if (filePaths.length === 0) return res.status(400).json({ error: '请提供 filePaths 数组' });
 
   try {
-    res.json(await updateMatchedRemoteFiles({ filePaths, dryRun }));
+    res.json(await updateMatchedRemoteFiles({ filePaths, dryRun, force }));
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+openaiAuthRoutes.post('/reset-remote-state', async (req, res) => {
+  const filePaths = Array.isArray(req.body?.filePaths)
+    ? req.body.filePaths.map((item: unknown) => String(item))
+    : [];
+  const dryRun = req.body?.dryRun === true;
+  if (filePaths.length === 0) return res.status(400).json({ error: '请提供 filePaths 数组' });
+
+  try {
+    res.json(await resetMatchedRemoteStateAndEnableScheduling({ filePaths, dryRun }));
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }

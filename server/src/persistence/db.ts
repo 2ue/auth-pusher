@@ -206,6 +206,10 @@ db.exec(`
     lastRemoteUpdatedAt TEXT NOT NULL DEFAULT '',
     lastRemoteUpdateStatus TEXT NOT NULL DEFAULT '',
     lastRemoteUpdateError TEXT NOT NULL DEFAULT '',
+    lastRemoteActionType TEXT NOT NULL DEFAULT '',
+    lastRemoteActionAt TEXT NOT NULL DEFAULT '',
+    lastRemoteActionStatus TEXT NOT NULL DEFAULT '',
+    lastRemoteActionError TEXT NOT NULL DEFAULT '',
     createdAt TEXT NOT NULL DEFAULT '',
     updatedAt TEXT NOT NULL DEFAULT ''
   );
@@ -225,6 +229,20 @@ if (!accountCols.some((c) => c.name === 'batchId')) {
 }
 if (!accountCols.some((c) => c.name === 'sourceChannelId')) {
   db.exec("ALTER TABLE accounts ADD COLUMN sourceChannelId TEXT NOT NULL DEFAULT ''");
+}
+
+const openAiOauthFileStateCols = db.prepare("PRAGMA table_info(openai_oauth_file_states)").all() as { name: string }[];
+if (!openAiOauthFileStateCols.some((c) => c.name === 'lastRemoteActionType')) {
+  db.exec("ALTER TABLE openai_oauth_file_states ADD COLUMN lastRemoteActionType TEXT NOT NULL DEFAULT ''");
+}
+if (!openAiOauthFileStateCols.some((c) => c.name === 'lastRemoteActionAt')) {
+  db.exec("ALTER TABLE openai_oauth_file_states ADD COLUMN lastRemoteActionAt TEXT NOT NULL DEFAULT ''");
+}
+if (!openAiOauthFileStateCols.some((c) => c.name === 'lastRemoteActionStatus')) {
+  db.exec("ALTER TABLE openai_oauth_file_states ADD COLUMN lastRemoteActionStatus TEXT NOT NULL DEFAULT ''");
+}
+if (!openAiOauthFileStateCols.some((c) => c.name === 'lastRemoteActionError')) {
+  db.exec("ALTER TABLE openai_oauth_file_states ADD COLUMN lastRemoteActionError TEXT NOT NULL DEFAULT ''");
 }
 
 // ── Indexes ─────────────────────────────────────────────────────

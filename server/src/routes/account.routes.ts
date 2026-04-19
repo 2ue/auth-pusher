@@ -51,7 +51,7 @@ const upload = multer({
   },
 });
 
-export const accountRoutes = Router();
+export const accountRoutes: ReturnType<typeof Router> = Router();
 
 function parseQuery(req: { query: Record<string, unknown> }): AccountQuery {
   const sourceType = req.query.sourceType === 'local' || req.query.sourceType === 'remote'

@@ -27,12 +27,26 @@ interface ManagedOpenAiOAuthFile {
   matchedRemoteId?: string;
   matchStatus?: string;
   matchError?: string;
+  remoteCapabilities?: {
+    fetchRemote: boolean;
+    updateRemote: boolean;
+    forceUpdateRemote: boolean;
+    resetRemoteState: boolean;
+    setSchedulable: boolean;
+    resetAndEnableScheduling: boolean;
+  };
   syncStatus: string;
   canRemoteUpdate: boolean;
+  canForceRemoteUpdate: boolean;
+  canResetRemoteStateAndEnableScheduling: boolean;
   lastMatchedAt?: string;
   lastRemoteUpdatedAt?: string;
   lastRemoteUpdateStatus?: string;
   lastRemoteUpdateError?: string;
+  lastRemoteActionType?: string;
+  lastRemoteActionAt?: string;
+  lastRemoteActionStatus?: string;
+  lastRemoteActionError?: string;
 }
 
 interface ManagedOpenAiOAuthFilesResponse {
@@ -59,8 +73,9 @@ interface MatchResponse {
   failed: number;
 }
 
-interface UpdateResponse {
+interface RemoteActionResponse {
   dryRun: boolean;
+  action: 'update_remote' | 'force_update_remote' | 'reset_remote_state_and_enable_scheduling';
   updated: number;
   skipped: number;
   failed: number;
@@ -68,6 +83,7 @@ interface UpdateResponse {
     path: string;
     email: string;
     status: 'updated' | 'would_update' | 'skipped' | 'failed';
+    action: 'update_remote' | 'force_update_remote' | 'reset_remote_state_and_enable_scheduling';
     channelName?: string;
     remoteId?: string;
     error?: string;
@@ -110,6 +126,32 @@ function formatMatch(file: ManagedOpenAiOAuthFile): string {
   return '未匹配';
 }
 
+function formatRemoteActionLabel(action?: string): string {
+  switch (action) {
+    case 'update_remote':
+      return '普通更新';
+    case 'force_update_remote':
+      return '强制更新';
+    case 'reset_remote_state_and_enable_scheduling':
+      return '重置状态+打开调度';
+    default:
+      return '未操作';
+  }
+}
+
+function formatRemoteActionStatusLabel(status?: string): string {
+  switch (status) {
+    case 'success':
+      return '成功';
+    case 'failed':
+      return '失败';
+    case 'skipped':
+      return '跳过';
+    default:
+      return status || '';
+  }
+}
+
 export default function OpenAiOAuthPage() {
   const { notify, confirm } = useFeedback();
   const [starting, setStarting] = useState(false);
@@ -118,6 +160,8 @@ export default function OpenAiOAuthPage() {
   const [matching, setMatching] = useState(false);
   const [dryRunning, setDryRunning] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [forceUpdating, setForceUpdating] = useState(false);
+  const [resettingRemoteState, setResettingRemoteState] = useState(false);
   const [directory, setDirectory] = useState('');
   const [files, setFiles] = useState<ManagedOpenAiOAuthFile[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -155,6 +199,8 @@ export default function OpenAiOAuthPage() {
     [files, selected],
   );
   const readySelectedCount = selectedFiles.filter((file) => file.canRemoteUpdate).length;
+  const forceReadySelectedCount = selectedFiles.filter((file) => file.canForceRemoteUpdate).length;
+  const resetReadySelectedCount = selectedFiles.filter((file) => file.canResetRemoteStateAndEnableScheduling).length;
   const allSelected = files.length > 0 && selected.size === files.length;
   const statusSummary = useMemo(() => {
     return files.reduce<Record<string, number>>((acc, file) => {
@@ -226,7 +272,11 @@ export default function OpenAiOAuthPage() {
     }
   }
 
-  async function handleUpdateSelected(dryRun: boolean) {
+  async function handleUpdateSelected(options: {
+    dryRun: boolean;
+    force?: boolean;
+  }) {
+    const { dryRun, force = false } = options;
     if (selectedPaths.length === 0) {
       notify({ tone: 'error', title: '请先选择 JSON 文件' });
       return;
@@ -234,31 +284,69 @@ export default function OpenAiOAuthPage() {
 
     if (!dryRun) {
       const accepted = await confirm({
-        title: '更新远端号池',
-        description: `将尝试更新 ${selectedPaths.length} 个 JSON 对应的远端账号。已成功同步且未变化的文件会自动跳过。`,
-        confirmText: '开始更新',
+        title: force ? '强制 Push 更新远端号池' : '更新远端号池',
+        description: force
+          ? `将强制更新 ${selectedPaths.length} 个 JSON 对应的远端账号。即使 JSON 内容未变化，也会继续覆盖远端。`
+          : `将尝试更新 ${selectedPaths.length} 个 JSON 对应的远端账号。已成功同步且未变化的文件会自动跳过。`,
+        confirmText: force ? '强制更新' : '开始更新',
       });
       if (!accepted) return;
     }
 
-    const setter = dryRun ? setDryRunning : setUpdating;
+    const setter = dryRun ? setDryRunning : (force ? setForceUpdating : setUpdating);
     setter(true);
     try {
-      const result = await post<UpdateResponse>('/openai-auth/update-remote', {
+      const result = await post<RemoteActionResponse>('/openai-auth/update-remote', {
         filePaths: selectedPaths,
         dryRun,
+        force,
       });
       const tone = result.failed > 0 ? 'info' : 'success';
-      const title = dryRun ? '模拟更新完成' : '远端更新完成';
+      const title = dryRun ? '模拟更新完成' : force ? '强制更新完成' : '远端更新完成';
       const description = dryRun
         ? `可更新 ${result.items.filter((item) => item.status === 'would_update').length} 个，跳过 ${result.skipped} 个，失败 ${result.failed} 个`
         : `更新 ${result.updated} 个，跳过 ${result.skipped} 个，失败 ${result.failed} 个`;
       notify({ tone, title, description });
       await loadFiles();
     } catch (err) {
-      notify({ tone: 'error', title: dryRun ? '模拟更新失败' : '远端更新失败', description: (err as Error).message });
+      notify({
+        tone: 'error',
+        title: dryRun ? '模拟更新失败' : force ? '强制更新失败' : '远端更新失败',
+        description: (err as Error).message,
+      });
     } finally {
       setter(false);
+    }
+  }
+
+  async function handleResetRemoteStateSelected() {
+    if (selectedPaths.length === 0) {
+      notify({ tone: 'error', title: '请先选择 JSON 文件' });
+      return;
+    }
+
+    const accepted = await confirm({
+      title: '重置远端状态并打开调度',
+      description: `将对 ${selectedPaths.length} 个已匹配 JSON 执行“重置远端状态 + 打开调度”。这一步不会修改本地 JSON 内容锁。`,
+      confirmText: '开始处理',
+    });
+    if (!accepted) return;
+
+    setResettingRemoteState(true);
+    try {
+      const result = await post<RemoteActionResponse>('/openai-auth/reset-remote-state', {
+        filePaths: selectedPaths,
+      });
+      notify({
+        tone: result.failed > 0 ? 'info' : 'success',
+        title: '重置远端状态完成',
+        description: `成功 ${result.updated} 个，失败 ${result.failed} 个`,
+      });
+      await loadFiles();
+    } catch (err) {
+      notify({ tone: 'error', title: '重置远端状态失败', description: (err as Error).message });
+    } finally {
+      setResettingRemoteState(false);
     }
   }
 
@@ -298,6 +386,7 @@ export default function OpenAiOAuthPage() {
           <Badge variant="info">回调文件名 = 邮箱.json</Badge>
           <Badge variant="muted">支持当前项目 JSON 与 team-auto 凭证 JSON</Badge>
           <Badge variant="muted">远端更新成功后，同内容 JSON 会被锁定，直到文件再次变化</Badge>
+          <Badge variant="warning">强制 Push 更新会绕过内容锁</Badge>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -318,18 +407,24 @@ export default function OpenAiOAuthPage() {
           <div>
             <h3 className="text-sm font-semibold">JSON 列表</h3>
             <p className="text-xs text-muted-foreground mt-1">
-              先勾选文件，再点“匹配号池”。建议先跑一次“模拟远端更新”，确认不会误命中之后再做正式更新。
+              先勾选文件，再点“匹配号池”。建议先跑一次“模拟远端更新”，确认不会误命中之后再做正式更新。强制更新和重置调度都是独立批量动作。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="secondary" onClick={() => { void handleMatchSelected(); }} loading={matching} disabled={selectedPaths.length === 0}>
               {matching ? '匹配中...' : '匹配号池'}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => { void handleUpdateSelected(true); }} loading={dryRunning} disabled={selectedPaths.length === 0}>
+            <Button size="sm" variant="outline" onClick={() => { void handleUpdateSelected({ dryRun: true }); }} loading={dryRunning} disabled={selectedPaths.length === 0}>
               {dryRunning ? '模拟中...' : '模拟远端更新'}
             </Button>
-            <Button size="sm" variant="primary" onClick={() => { void handleUpdateSelected(false); }} loading={updating} disabled={selectedPaths.length === 0 || readySelectedCount === 0}>
+            <Button size="sm" variant="primary" onClick={() => { void handleUpdateSelected({ dryRun: false }); }} loading={updating} disabled={selectedPaths.length === 0 || readySelectedCount === 0}>
               {updating ? '更新中...' : '更新远端号池'}
+            </Button>
+            <Button size="sm" variant="destructive" onClick={() => { void handleUpdateSelected({ dryRun: false, force: true }); }} loading={forceUpdating} disabled={selectedPaths.length === 0 || forceReadySelectedCount === 0}>
+              {forceUpdating ? '强制更新中...' : '强制 Push 更新'}
+            </Button>
+            <Button size="sm" variant="secondary" onClick={() => { void handleResetRemoteStateSelected(); }} loading={resettingRemoteState} disabled={selectedPaths.length === 0 || resetReadySelectedCount === 0}>
+              {resettingRemoteState ? '处理中...' : '重置远端状态+打开调度'}
             </Button>
           </div>
         </div>
@@ -410,6 +505,14 @@ export default function OpenAiOAuthPage() {
                           <div className="text-[11px] text-muted-foreground mt-1 break-all">
                             {file.lastRemoteUpdatedAt ? `上次远端更新: ${new Date(file.lastRemoteUpdatedAt).toLocaleString()}` : ''}
                             {file.lastRemoteUpdateError ? ` ${file.lastRemoteUpdateError}` : ''}
+                          </div>
+                        )}
+                        {(file.lastRemoteActionAt || file.lastRemoteActionError) && (
+                          <div className="text-[11px] text-muted-foreground mt-1 break-all">
+                            最近动作: {formatRemoteActionLabel(file.lastRemoteActionType)}
+                            {file.lastRemoteActionStatus ? ` / ${formatRemoteActionStatusLabel(file.lastRemoteActionStatus)}` : ''}
+                            {file.lastRemoteActionAt ? ` / ${new Date(file.lastRemoteActionAt).toLocaleString()}` : ''}
+                            {file.lastRemoteActionError ? ` / ${file.lastRemoteActionError}` : ''}
                           </div>
                         )}
                       </TableCell>

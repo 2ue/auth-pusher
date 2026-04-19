@@ -188,7 +188,7 @@ function applyExportOverrides(
   return next;
 }
 
-export const dataRoutes = Router();
+export const dataRoutes: ReturnType<typeof Router> = Router();
 
 /** 按 fileId 分页读取解析后的完整记录 */
 dataRoutes.get('/records/:fileId', (req, res) => {
@@ -409,6 +409,7 @@ dataRoutes.post('/append/:fileId', upload.array('files', 500), (req, res) => {
     if (!files || files.length === 0) return res.status(400).json({ error: '请上传文件' });
 
     const rawFileId = String(req.params.fileId ?? '');
+    const safeFileId = rawFileId;
     let mergedPath: string;
     try { mergedPath = resolveMergedPath(rawFileId); } catch { return res.status(404).json({ error: '原始文件不存在，请重新上传' }); }
 
@@ -448,7 +449,7 @@ dataRoutes.post('/append/:fileId', upload.array('files', 500), (req, res) => {
     fs.writeFileSync(mergedPath, JSON.stringify(merged, null, 2), 'utf-8');
 
     const now = new Date().toISOString();
-    const batchId = safeFileId.replace(/\.\w+$/, '');
+    const batchId = safeFileId.replace(/[\\/]/g, '_').replace(/\.\w+$/, '');
     fileStore.upsertMany(files.map((f) => ({
       id: nanoid(12),
       batchId,

@@ -5,7 +5,7 @@ import archiver from 'archiver';
 import { getDataDir } from '../persistence/json-store.js';
 import * as fileStore from '../persistence/file.store.js';
 
-export const fileRoutes = Router();
+export const fileRoutes: ReturnType<typeof Router> = Router();
 
 /** 文件列表（可按 taskId 或 batchId 筛选） */
 fileRoutes.get('/', (req, res) => {

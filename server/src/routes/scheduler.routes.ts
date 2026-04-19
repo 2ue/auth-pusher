@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import * as schedulerService from '../services/scheduler.service.js';
 
-export const schedulerRoutes = Router();
+export const schedulerRoutes: ReturnType<typeof Router> = Router();
 
 schedulerRoutes.get('/', (_req, res) => {
   res.json(schedulerService.listScheduledTasks());

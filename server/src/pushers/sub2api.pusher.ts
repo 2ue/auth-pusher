@@ -5,25 +5,19 @@ import type { PusherSchema, PushRequest } from '../../../shared/types/pusher.js'
 import type { MappedDataItem } from '../../../shared/types/data.js';
 import type { Account } from '../../../shared/types/account.js';
 import { resolvePlanTypeFromTokens } from '../utils/jwt.js';
-
-const API_PATH = '/api/v1/admin/accounts';
-const GROUPS_PATH = '/api/v1/admin/groups';
-const BULK_UPDATE_PATH = '/api/v1/admin/accounts/bulk-update';
-const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
-
-/** 解码 JWT payload（不验证签名） */
-function decodeJwtPayload(token: string): Record<string, unknown> {
-  try {
-    const parts = token.split('.');
-    if (parts.length < 2) return {};
-    let payload = parts[1];
-    payload += '='.repeat((4 - payload.length % 4) % 4);
-    const json = Buffer.from(payload, 'base64url').toString('utf-8');
-    return JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
+import {
+  SUB2API_ACCOUNT_API_PATH as API_PATH,
+  SUB2API_GROUPS_API_PATH as GROUPS_PATH,
+  SUB2API_BULK_UPDATE_PATH as BULK_UPDATE_PATH,
+  OPENAI_OAUTH_CLIENT_ID,
+  type Sub2ApiConnection,
+  buildOpenAiOauthCredentials,
+  buildSub2ApiHeaders,
+  decodeJwtPayload,
+  extractSub2ApiConnection,
+  normalizeSub2ApiAuthMode,
+  parseSub2ApiGroupIds,
+} from '../channels/sub2api.shared.js';
 
 export interface Sub2ApiGroup {
   id: number;
@@ -75,7 +69,7 @@ export class Sub2ApiPusher extends BasePusher {
   buildRequest(item: MappedDataItem, config: Record<string, unknown>): PushRequest {
     const baseUrl = String(config.base_url).replace(/\/+$/, '');
     const token = String(config.token);
-    const authMode = normalizeAuthMode(String(config.auth_mode ?? 'admin_api_key'));
+    const authMode = normalizeSub2ApiAuthMode(String(config.auth_mode ?? 'admin_api_key'));
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -129,7 +123,7 @@ export class Sub2ApiPusher extends BasePusher {
     if (refreshToken) credentials.refresh_token = refreshToken;
     // id_token: sub2api OAuth 流程会保存，缺失可能导致 refresh 报错
     if (idToken) credentials.id_token = idToken;
-    credentials.client_id = OAUTH_CLIENT_ID;
+    credentials.client_id = OPENAI_OAUTH_CLIENT_ID;
     if (chatgptAccountId) credentials.chatgpt_account_id = chatgptAccountId;
     if (chatgptUserId) credentials.chatgpt_user_id = chatgptUserId;
     if (organizationId) credentials.organization_id = organizationId;
@@ -164,7 +158,7 @@ export class Sub2ApiPusher extends BasePusher {
     };
 
     // 分组
-    const groupIds = parseGroupIds(config.group_ids);
+    const groupIds = parseSub2ApiGroupIds(config.group_ids);
     if (groupIds.length > 0) jsonBody.group_ids = groupIds;
 
     // 可选数值参数：仅传明确设置了且 > 0 的值，避免传 0 覆盖远端默认值
@@ -196,7 +190,7 @@ export class Sub2ApiPusher extends BasePusher {
   async fetchGroups(config: Record<string, unknown>): Promise<Sub2ApiGroup[]> {
     const baseUrl = String(config.base_url).replace(/\/+$/, '');
     const token = String(config.token);
-    const authMode = normalizeAuthMode(String(config.auth_mode ?? 'admin_api_key'));
+    const authMode = normalizeSub2ApiAuthMode(String(config.auth_mode ?? 'admin_api_key'));
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -272,8 +266,8 @@ export class Sub2ApiPusher extends BasePusher {
   override canUpdateRemote(): boolean { return true; }
 
   override async deleteAccount(config: Record<string, unknown>, remoteId: string): Promise<{ ok: boolean; error?: string }> {
-    const conn = extractConn(config);
-    const headers = buildHeaders(conn);
+    const conn = extractSub2ApiConnection(config);
+    const headers = buildSub2ApiHeaders(conn);
     const url = `${conn.baseUrl}${API_PATH}/${remoteId}`;
     try {
       const { status, data } = await axios.delete<Record<string, unknown>>(url, { headers, timeout: 15000, validateStatus: () => true });
@@ -294,9 +288,9 @@ export class Sub2ApiPusher extends BasePusher {
       return { ok: false, error: `无效的远端账号 ID: ${remoteId}` };
     }
 
-    const conn = extractConn(config);
+    const conn = extractSub2ApiConnection(config);
     const headers = {
-      ...buildHeaders(conn),
+      ...buildSub2ApiHeaders(conn),
       'Content-Type': 'application/json',
     };
 
@@ -364,7 +358,7 @@ export class Sub2ApiPusher extends BasePusher {
 
   /** 从 sub2api 同步 auth 类型账号到本地 */
   override async syncAccounts(config: Record<string, unknown>): Promise<Account[]> {
-    const conn = extractConn(config);
+    const conn = extractSub2ApiConnection(config);
     const accounts: Account[] = [];
     let page = 1;
     const pageSize = 500;
@@ -403,7 +397,7 @@ export class Sub2ApiPusher extends BasePusher {
 
   /** 拉取远端账号列表 */
   override async fetchRemoteAccounts(config: Record<string, unknown>): Promise<RemoteAccountFull[]> {
-    const conn = extractConn(config);
+    const conn = extractSub2ApiConnection(config);
     const results: RemoteAccountFull[] = [];
     let page = 1;
     const pageSize = 500;
@@ -436,116 +430,12 @@ export class Sub2ApiPusher extends BasePusher {
   }
 }
 
-function extractConn(config: Record<string, unknown>) {
-  return {
-    baseUrl: String(config.base_url ?? '').replace(/\/+$/, ''),
-    token: String(config.token ?? config.admin_key ?? ''),
-    authMode: normalizeAuthMode(String(config.auth_mode ?? 'admin_api_key')),
-  };
-}
-
-function buildHeaders(conn: { token: string; authMode: string }): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (conn.authMode === 'admin_jwt') headers['Authorization'] = `Bearer ${conn.token}`;
-  else headers['x-api-key'] = conn.token;
-  return headers;
-}
-
-async function fetchPage(conn: { baseUrl: string; token: string; authMode: string }, page: number, pageSize: number) {
+async function fetchPage(conn: Sub2ApiConnection, page: number, pageSize: number) {
   const url = `${conn.baseUrl}${API_PATH}?page=${page}&page_size=${pageSize}&platform=openai`;
-  const { data: body } = await axios.get<Record<string, unknown>>(url, { headers: buildHeaders(conn), timeout: 30000 });
+  const { data: body } = await axios.get<Record<string, unknown>>(url, { headers: buildSub2ApiHeaders(conn), timeout: 30000 });
   if (body.code !== 0 && body.code !== 200) throw new Error(`Sub2API 错误: ${body.message ?? body.msg ?? '未知'}`);
   const data = body.data as Record<string, unknown>;
   const items = (Array.isArray(data) ? data : (data?.items as unknown[] ?? [])) as Record<string, unknown>[];
   const total = Number((data as Record<string, unknown>)?.total ?? 0);
   return { items, total };
-}
-
-function normalizeAuthMode(mode: string): 'admin_api_key' | 'admin_jwt' {
-  const m = mode.toLowerCase().trim();
-  if (['admin_jwt', 'jwt', 'bearer'].includes(m)) return 'admin_jwt';
-  return 'admin_api_key';
-}
-
-function parseGroupIds(value: unknown): number[] {
-  if (!value) return [];
-  const str = String(value);
-  return str.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
-}
-
-function buildOpenAiOauthCredentials(input: {
-  email?: string;
-  accessToken: string;
-  refreshToken?: string;
-  idToken?: string;
-  accountId?: string;
-  organizationId?: string;
-  planType?: string;
-  clientId?: string;
-  userId?: string;
-  expiredAt?: string;
-  modelMapping?: unknown;
-}): Record<string, unknown> {
-  const accessToken = String(input.accessToken ?? '');
-  const refreshToken = String(input.refreshToken ?? '');
-  const idToken = String(input.idToken ?? '');
-
-  const atPayload = decodeJwtPayload(accessToken);
-  const atAuth = (atPayload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
-  const itPayload = decodeJwtPayload(idToken);
-  const itAuth = (itPayload['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
-
-  const accountId = String(
-    input.accountId
-    ?? atAuth.chatgpt_account_id
-    ?? '',
-  );
-  const userId = String(
-    input.userId
-    ?? atAuth.chatgpt_user_id
-    ?? '',
-  );
-
-  let organizationId = String(
-    input.organizationId
-    ?? itAuth.organization_id
-    ?? '',
-  );
-  if (!organizationId) {
-    const orgs = Array.isArray(itAuth.organizations) ? itAuth.organizations : [];
-    if (orgs.length > 0) {
-      organizationId = String((orgs[0] as Record<string, unknown>)?.id ?? '');
-    }
-  }
-
-  const expTimestamp = Number(atPayload.exp ?? 0);
-  const credentials: Record<string, unknown> = {
-    access_token: accessToken,
-  };
-
-  const expiresAt = String(input.expiredAt ?? '').trim();
-  if (expiresAt) credentials.expires_at = expiresAt;
-  else if (expTimestamp > 0) credentials.expires_at = new Date(expTimestamp * 1000).toISOString();
-
-  if (refreshToken) credentials.refresh_token = refreshToken;
-  if (idToken) credentials.id_token = idToken;
-  if (String(input.email ?? '').trim()) credentials.email = String(input.email).trim();
-  credentials.client_id = String(input.clientId ?? atPayload.client_id ?? OAUTH_CLIENT_ID).trim() || OAUTH_CLIENT_ID;
-  if (accountId) credentials.chatgpt_account_id = accountId;
-  if (userId) credentials.chatgpt_user_id = userId;
-  if (organizationId) credentials.organization_id = organizationId;
-
-  const planType = String(
-    input.planType
-    ?? atAuth.chatgpt_plan_type
-    ?? itAuth.chatgpt_plan_type
-    ?? '',
-  );
-  if (planType) credentials.plan_type = planType;
-
-  if (input.modelMapping && typeof input.modelMapping === 'object' && Object.keys(input.modelMapping as object).length > 0) {
-    credentials.model_mapping = input.modelMapping;
-  }
-
-  return credentials;
 }

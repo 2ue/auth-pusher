@@ -3,7 +3,7 @@ import { nanoid } from 'nanoid';
 import * as store from '../persistence/profile.store.js';
 import type { DataProfile } from '../../../shared/types/data-profile.js';
 
-export const profileRoutes = Router();
+export const profileRoutes: ReturnType<typeof Router> = Router();
 
 profileRoutes.get('/', (_req, res) => {
   res.json(store.loadProfiles());
